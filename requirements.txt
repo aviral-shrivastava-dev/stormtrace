@@ -1,0 +1,4 @@
+# StormTrace runtime dependencies.
+# Python 3.10 or newer is required (timezone-aware datetime.UTC usage).
+duckdb==1.5.5
+matplotlib==3.11.1

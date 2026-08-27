@@ -1,0 +1,24 @@
+# Downloaded data is reproducible from public sources and grows forever.
+# Bronze is immutable evidence, but it is not a git artifact.
+data/
+
+# Python-generated files.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Test and tool caches.
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local editor and operating-system files.
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
