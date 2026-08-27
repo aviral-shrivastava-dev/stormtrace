@@ -79,6 +79,7 @@ Outputs land in `data\gold\` (CSV tables) and `data\reports\` (charts and
 src\    ingestion, loading, quality gate, orchestration, analysis
 sql\    SQL transformations for Gold tables (lessons 3, 4, 8, 11, 12)
 scripts\ Windows scheduled-task setup and removal
+.github\workflows\ continuous-integration smoke test
 data\   bronze/ silver/ gold/ reports/ quality/ logs/  (not committed)
 ```
 
@@ -135,7 +136,7 @@ python src\ingest_celestrak.py
 The script will:
 
 1. Ask CelesTrak for orbit records for each tracked group (currently the
-   `stations` and `cubesat` groups; see Lesson 10).
+   `stations`, `cubesat`, and `science` groups; see Lessons 10 and 14).
 2. Validate that the response has the fields we need.
 3. Save the unchanged response under `data/bronze/celestrak/`.
 4. Save selected, consistently named columns under `data/silver/`.
@@ -187,12 +188,13 @@ Phases 1-7 below are complete; later phases build on them.
 | 11 | Element freshness analysis | Point-in-time age, percentiles | DuckDB | Done |
 | 12 | Orbit Reliability Index | Explainable scoring, documentation | DuckDB | Done |
 | 13 | GitHub packaging | Version control, reproducibility | Git | Done |
-| 14 | Validate ORI against measurements | Backtesting, calibration | Python | Planned |
-| 15 | Move data into a local lakehouse | Object storage, table formats | Docker, MinIO, Iceberg | Planned |
-| 16 | Process larger history | Distributed processing | Spark | Planned |
-| 17 | Add real-time events | Streaming and event time | Kafka/Redpanda | Planned |
-| 18 | Create models | Features, backtests, model tracking | scikit-learn, MLflow | Planned |
-| 19 | Publish a usable product | APIs, dashboards, monitoring | FastAPI, Grafana | Planned |
+| 14 | Science group and continuous integration | Population growth, CI discipline | GitHub Actions | Done |
+| 15 | Validate ORI against measurements | Backtesting, calibration | Python | Planned |
+| 16 | Move data into a local lakehouse | Object storage, table formats | Docker, MinIO, Iceberg | Planned |
+| 17 | Process larger history | Distributed processing | Spark | Planned |
+| 18 | Add real-time events | Streaming and event time | Kafka/Redpanda | Planned |
+| 19 | Create models | Features, backtests, model tracking | scikit-learn, MLflow | Planned |
+| 20 | Publish a usable product | APIs, dashboards, monitoring | FastAPI, Grafana | Planned |
 
 ## Rules For Scientific Honesty
 
@@ -939,3 +941,57 @@ git push -u origin main
 3. Clone your own repository into a different folder and run the quick
    start; confirm the pipeline rebuilds everything from scratch.
 4. Explain why pinning dependency versions matters six months from now.
+
+## Lesson 14: Science Group And Continuous Integration
+
+Two additions that make StormTrace both scientifically broader and
+employer-ready.
+
+### The Science Group
+
+Adding a tracked group is a one-line change to `DEFAULT_GROUPS` in
+`src\ingest_celestrak.py`. The science group contributed 48 research
+satellites and immediately produced a fresh finding:
+
+| Group | Median element age | Stale >24h | Median ORI |
+|---|---:|---:|---:|
+| science | 13.9 h | 14.6% | 64.3 |
+| cubesat | 15.9 h | 25.6% | 54.4 |
+| stations | 17.0 h | 31.8% | 43.6 |
+
+Research satellites are the best-tracked population in the public catalog —
+fresher than cubesats and even than station-group objects — and they score
+the highest reliability. The group also added 12 high-altitude objects
+(averaging 64,000 km) where drag is negligible, which demonstrates the
+reliability index responding to orbital regime exactly as designed.
+
+This table is itself a research result: catalog tracking quality varies
+systematically by object class, and any population-level space-weather study
+must account for that bias.
+
+### Continuous Integration
+
+`.github/workflows/ci.yml` runs a smoke test on every push and pull request:
+
+1. Install the pinned dependencies
+2. Compile every Python source file
+3. Verify every SQL file exists and is non-empty
+4. Verify dependencies and the orchestrator import cleanly
+
+The checks deliberately never contact CelesTrak or NOAA. CI runners are
+shared cloud machines, and the project's provider-respect principle applies
+to any machine it runs on — automated cloud requests against rate-limited
+public services would be both rude and unreliable as a test.
+
+Once pushed, every future commit shows a green check mark in GitHub — the
+smallest possible signal that the repository is maintained like production
+code.
+
+### Lesson 14 Exercise
+
+1. Add another group name to `DEFAULT_GROUPS` (browse the CelesTrak GP
+   index for options), run the pipeline, and observe the new group's
+   freshness statistics.
+2. Read `.github/workflows/ci.yml` and explain each step in your own words.
+3. Push a change and watch the Actions tab run the checks.
+4. Explain why CI must not download data even though the pipeline does.

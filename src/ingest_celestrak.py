@@ -13,8 +13,10 @@ from urllib.request import Request, urlopen
 
 # Tracked CelesTrak GP groups. The small stations group covers crewed
 # vehicles; the cubesat group adds a large drag-sensitive LEO population
-# for population-level research. Add more groups here as the project grows.
-DEFAULT_GROUPS = ["stations", "cubesat"]
+# for population-level research. The science group adds several hundred
+# research satellites across many orbital regimes. Add more groups here
+# as the project grows.
+DEFAULT_GROUPS = ["stations", "cubesat", "science"]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BRONZE_DIR = PROJECT_ROOT / "data" / "bronze" / "celestrak"

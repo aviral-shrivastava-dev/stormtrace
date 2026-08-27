@@ -1,0 +1,52 @@
+name: CI
+
+# Smoke tests for every push and pull request. These checks intentionally
+# never contact CelesTrak or NOAA: CI runners must not make data-source
+# requests, and public usage policies must be respected from any machine.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compile all Python sources
+        run: python -m py_compile src/*.py
+
+      - name: Verify SQL files are present and non-empty
+        shell: python
+        run: |
+          from pathlib import Path
+          import sys
+
+          sql_dir = Path("sql")
+          sql_files = sorted(sql_dir.glob("*.sql"))
+          if not sql_files:
+              print("No SQL files found", file=sys.stderr)
+              sys.exit(1)
+          for path in sql_files:
+              size = path.stat().st_size
+              if size == 0:
+                  print(f"SQL file is empty: {path}", file=sys.stderr)
+                  sys.exit(1)
+              print(f"OK {path} ({size} bytes)")
+
+      - name: Verify imports resolve without network access
+        run: python -c "import duckdb, matplotlib; print('dependencies import cleanly')"
+
+      - name: Verify pipeline dry-run logic imports
+        run: python -c "import sys; sys.path.insert(0, 'src'); import run_pipeline; print('orchestrator imports cleanly')"
