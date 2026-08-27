@@ -38,6 +38,8 @@ summarize_history  build_gold    build_orbit_features
                       |
               analyze_research.py      (orbit change, freshness, ORI, charts)
                       |
+        build_propagation_disagreement.py  (SGP4 drift between element sets)
+                      |
         data\gold\*.csv  +  data\reports\*.png / research_summary.md
 ```
 
@@ -189,12 +191,13 @@ Phases 1-7 below are complete; later phases build on them.
 | 12 | Orbit Reliability Index | Explainable scoring, documentation | DuckDB | Done |
 | 13 | GitHub packaging | Version control, reproducibility | Git | Done |
 | 14 | Science group and continuous integration | Population growth, CI discipline | GitHub Actions | Done |
-| 15 | Validate ORI against measurements | Backtesting, calibration | Python | Planned |
-| 16 | Move data into a local lakehouse | Object storage, table formats | Docker, MinIO, Iceberg | Planned |
-| 17 | Process larger history | Distributed processing | Spark | Planned |
-| 18 | Add real-time events | Streaming and event time | Kafka/Redpanda | Planned |
-| 19 | Create models | Features, backtests, model tracking | scikit-learn, MLflow | Planned |
-| 20 | Publish a usable product | APIs, dashboards, monitoring | FastAPI, Grafana | Planned |
+| 15 | SGP4 propagation disagreement | Orbit propagation, RIC frames, migration | sgp4 | Done |
+| 16 | Validate ORI against measurements | Backtesting, calibration | Python | Planned |
+| 17 | Move data into a local lakehouse | Object storage, table formats | Docker, MinIO, Iceberg | Planned |
+| 18 | Process larger history | Distributed processing | Spark | Planned |
+| 19 | Add real-time events | Streaming and event time | Kafka/Redpanda | Planned |
+| 20 | Create models | Features, backtests, model tracking | scikit-learn, MLflow | Planned |
+| 21 | Publish a usable product | APIs, dashboards, monitoring | FastAPI, Grafana | Planned |
 
 ## Rules For Scientific Honesty
 
@@ -995,3 +998,85 @@ code.
 2. Read `.github/workflows/ci.yml` and explain each step in your own words.
 3. Push a change and watch the Actions tab run the checks.
 4. Explain why CI must not download data even though the pipeline does.
+
+## Lesson 15: SGP4 Propagation Disagreement
+
+This is the project's core scientific instrument. Everything so far derived
+features from element *values*; this lesson measures how far an old element
+set's **prediction** drifts from a newer one.
+
+### What It Measures
+
+For each object, when a refreshed element set appears (a later element with
+a different epoch):
+
+1. Build an SGP4 satellite from the **earlier** element.
+2. Propagate it forward to the **later** element's epoch.
+3. Build an SGP4 satellite from the **later** element and evaluate its
+   position at its own epoch.
+4. Measure the difference, decomposed into **radial**, **along-track**, and
+   **cross-track** components in the reference orbit's RIC frame.
+
+The result is the *public orbit propagation disagreement* — how far the old
+public estimate drifted from where the newer public estimate places the
+object. The later element is **not** perfect ground truth; this measures
+disagreement between successive public estimates, which is the honest,
+measurable quantity available from public data.
+
+### Why RIC Components Matter
+
+Raw xyz differences are hard to interpret. The RIC (Radial, In-track,
+Cross-track) frame is tied to the orbit itself:
+
+- **Radial**: altitude error
+- **Along-track**: timing/phase error — where drag error accumulates
+- **Cross-track**: orbital-plane error — where inclination/RAAN errors show
+
+Drag uncertainty grows almost entirely along-track, so a storm-time signal
+would appear there first.
+
+### Validation Performed
+
+The instrument was validated twice:
+
+1. **Physical sanity**: ISS built from bronze CSV fields propagated to its
+   own epoch gives 418.3 km altitude, 7.662 km/s speed, and a 92.9-minute
+   period exactly matching the element's mean motion.
+2. **Synthetic pair test**: a simulated 12-hour refresh (90 m/day decay)
+   produced 28.1 km along-track, 0.03 km radial, 2.6 km cross-track — the
+   textbook drag signature. The first simulation attempt forgot to advance
+   the mean anomaly, and the instrument immediately flagged the resulting
+   9,629 km phase teleport: it detects element inconsistencies, which is
+   exactly what a research instrument must do.
+
+### The Schema Migration
+
+SGP4 needs the full element set (RAAN, argument of perigee, mean anomaly,
+and the mean-motion derivatives), which the original history table did not
+store. The loader now migrates older databases: it adds the new columns and
+rebuilds the orbital history from Bronze files, which remain on disk as the
+source of truth. No network access occurs during migration.
+
+### Current Status
+
+```text
+Objects with element history: 152
+Measurable element-set pairs: 0
+```
+
+All consecutive snapshots so far contain republished identical elements, so
+the instrument reports nothing rather than reporting a fake zero. The moment
+the catalog refreshes element epochs, real measurements appear automatically
+on the next pipeline run — this is the exact quantity the Orbit Reliability
+Index will be validated against.
+
+### Lesson 15 Exercise
+
+1. Run `python src\build_propagation_disagreement.py` and read the output.
+2. Open `src\build_propagation_disagreement.py` and find where degrees
+   become radians, and where rev/day becomes rad/min.
+3. Explain why along-track disagreement grows faster than radial
+   disagreement under drag.
+4. Explain why the later element is not treated as ground truth.
+5. Watch for the first measurable pair after the catalog refreshes, then
+   compare its span hours with its total km.

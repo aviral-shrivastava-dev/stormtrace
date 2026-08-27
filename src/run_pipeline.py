@@ -184,6 +184,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
         ("build_gold", "build_gold.py"),
         ("build_orbit_features", "build_orbit_features.py"),
         ("analyze_research", "analyze_research.py"),
+        ("build_propagation_disagreement", "build_propagation_disagreement.py"),
     ]:
         if not run_step(run_id, name, script):
             print(f"Pipeline stopped because {name} failed.", file=sys.stderr)

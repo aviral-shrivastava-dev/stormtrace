@@ -33,6 +33,11 @@ ORBITAL_COLUMNS = [
     "eccentricity",
     "mean_motion_revolutions_per_day",
     "bstar_drag_term",
+    "ra_of_asc_node_degrees",
+    "arg_of_pericenter_degrees",
+    "mean_anomaly_degrees",
+    "mean_motion_dot",
+    "mean_motion_ddot",
     "source_group",
     "source_file",
     "source_sha256",
@@ -95,6 +100,11 @@ def setup(connection: duckdb.DuckDBPyConnection) -> None:
             eccentricity DOUBLE,
             mean_motion_revolutions_per_day DOUBLE,
             bstar_drag_term DOUBLE,
+            ra_of_asc_node_degrees DOUBLE,
+            arg_of_pericenter_degrees DOUBLE,
+            mean_anomaly_degrees DOUBLE,
+            mean_motion_dot DOUBLE,
+            mean_motion_ddot DOUBLE,
             source_group VARCHAR,
             source_file VARCHAR,
             source_sha256 VARCHAR
@@ -140,6 +150,30 @@ def setup(connection: duckdb.DuckDBPyConnection) -> None:
         connection.execute(
             "UPDATE orbital_snapshot_history "
             "SET source_group = 'stations' WHERE source_group IS NULL"
+        )
+    # Migration for databases created before the full element set was stored.
+    # The extra fields (RAAN, argument of perigee, mean anomaly, and the
+    # mean-motion derivatives) are required for SGP4 propagation. Existing
+    # rows lack them, so the orbital history is rebuilt from Bronze files,
+    # which remain on disk as the source of truth. No network access occurs.
+    element_columns = [
+        "ra_of_asc_node_degrees",
+        "arg_of_pericenter_degrees",
+        "mean_anomaly_degrees",
+        "mean_motion_dot",
+        "mean_motion_ddot",
+    ]
+    missing_element_columns = [
+        column for column in element_columns if column not in columns
+    ]
+    if missing_element_columns:
+        for column in missing_element_columns:
+            connection.execute(
+                f"ALTER TABLE orbital_snapshot_history ADD COLUMN {column} DOUBLE"
+            )
+        connection.execute("DELETE FROM orbital_snapshot_history")
+        connection.execute(
+            "DELETE FROM bronze_file_registry WHERE source = 'celestrak'"
         )
 
 
@@ -240,6 +274,11 @@ def load_file(connection: duckdb.DuckDBPyConnection, path: Path) -> int:
                         number(item.get("ECCENTRICITY")),
                         number(item.get("MEAN_MOTION")),
                         number(item.get("BSTAR")),
+                        number(item.get("RA_OF_ASC_NODE")),
+                        number(item.get("ARG_OF_PERICENTER")),
+                        number(item.get("MEAN_ANOMALY")),
+                        number(item.get("MEAN_MOTION_DOT")),
+                        number(item.get("MEAN_MOTION_DDOT")),
                         group,
                         relative,
                         digest,
