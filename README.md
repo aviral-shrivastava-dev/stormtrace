@@ -17,19 +17,21 @@ warning system.
 ## Architecture
 
 ```text
-CelesTrak GP (stations, cubesat)      NOAA SWPC RTSW
-        |                                   |
-        v                                   v
-  ingest_celestrak.py                 ingest_noaa.py
-        |                                   |
-        +------- immutable Bronze ----------+
-                       |
+CelesTrak GP (stations, cubesat, science, iridium-33-debris)
+CelesTrak SW (daily Kp/Ap/F10.7)      NOAA SWPC RTSW      SatNOGS network
+        |                                     |                 |
+        v                                     v                 v
+  ingest_celestrak.py                  ingest_noaa.py    ingest_satnogs.py
+  ingest_space_weather.py
+        |                                     |                 |
+        +--------------- immutable Bronze ---------------------+
+                        |
                 load_history.py          (idempotent, checksummed)
-                       |
-                  DuckDB history
-                       |
+                        |
+                   DuckDB history
+                        |
                 check_quality.py        (gate: errors stop the pipeline)
-                       |
+                        |
      +----------------+----------------+
      |                |                |
 summarize_history  build_gold    build_orbit_features
@@ -104,7 +106,7 @@ Outputs land in `data\gold\` (CSV tables) and `data\reports\` (charts and
 
 ```text
 src\    ingestion, loading, quality gate, orchestration, analysis, API
-sql\    SQL transformations for Gold tables (lessons 3, 4, 8, 11, 12)
+sql\    SQL transformations for Gold tables (lessons 3, 4, 8, 11, 12, 23)
 scripts\ Windows scheduled-task setup and removal
 monitoring\ Prometheus scrape config and Grafana provisioning
 .github\workflows\ continuous-integration smoke test
@@ -165,7 +167,8 @@ python src\ingest_celestrak.py
 The script will:
 
 1. Ask CelesTrak for orbit records for each tracked group (currently the
-   `stations`, `cubesat`, and `science` groups; see Lessons 10 and 14).
+   `stations`, `cubesat`, `science`, and `iridium-33-debris` groups; see
+   Lessons 10, 14, and 23).
 2. Validate that the response has the fields we need.
 3. Save the unchanged response under `data/bronze/celestrak/`.
 4. Save selected, consistently named columns under `data/silver/`.
@@ -226,6 +229,7 @@ Phases 1-7 below are complete; later phases build on them.
 | 20 | Streaming events | Kafka API, topics, keys, consumer groups | Redpanda, confluent-kafka | Done |
 | 21 | Learning the index | GroupKFold, leakage control, MLflow tracking | scikit-learn, MLflow | Done |
 | 22 | Dashboards and monitoring | Prometheus semantics, dashboards as code | Grafana, Prometheus | Done |
+| 23 | The three-pillar dataset | Debris population, daily indices, telemetry metadata, versioned APIs | CelesTrak SW, SatNOGS | Done |
 
 ## Rules For Scientific Honesty
 
@@ -1692,6 +1696,113 @@ is the exact event the project is still waiting to capture.
    is busy.
 6. Run `python src\verify_dashboard.py`, then delete one panel's targets
    from the dashboard JSON and confirm the script fails on it.
+
+## Lesson 23: The Three-Pillar Research Dataset
+
+Orbit elements and solar-wind plasma gave StormTrace a drag proxy and a
+live disturbance flag, but the physics chain was incomplete. This lesson
+closes the three gaps that turn the project from "drag proxy" into a
+testable physical chain:
+
+```text
+daily solar indices (Kp, Ap, F10.7)      <- explanatory variable
+   -> atmosphere heats and expands
+   -> drag changes on low orbits
+orbit decay (mean motion, bstar)         <- measured effect
+telemetry activity (SatNOGS passes)      <- independent observability
+```
+
+### 1. A True Debris Population
+
+`iridium-33-debris` joined `DEFAULT_GROUPS`, adding **111 objects** from a
+single collision: a tight ~780 km band, no maneuvers, and the highest drag
+terms in the catalog. They are the cleanest natural drag experiment
+available — station-keeping cannot contaminate their signal. Adding a
+group stayed a one-line change, and the pipeline now tracks **263
+distinct objects** across four groups.
+
+### 2. Daily Geomagnetic And Solar Indices
+
+A new collector (`ingest_space_weather.py`) downloads CelesTrak's
+SW-Last5Years file: the eight 3-hour planetary K indices and their daily
+sum, the Ap average, sunspot number, and observed F10.7. Two thousand
+days of history arrived in the first run, covering solar minimum into the
+current maximum.
+
+Two real data lessons surfaced immediately:
+
+- **CelesTrak stores Kp in tenths.** A file value of `67` means Kp 6.7.
+  Bronze and Silver keep the file's own values as evidence; a Gold-table
+  comment explains the `/10.0` normalization so Kp sums (max 72) sit on
+  the familiar scale. **The measure** `max_kp_sum 67.0` lands exactly on
+  the 2024-05-11 storm — the strongest day since 2003.
+- **The last day is provisional and revised.** The history table keeps
+  every revision via content-hash dedupe (new `(date, values)` combos
+  append; unchanged days skip). Gold picks the newest snapshot per date.
+
+### 3. SatNOGS Telemetry Observations
+
+`ingest_satnogs.py` samples the SatNOGS network API: which satellite
+(NORAD id) was heard, by which station, when, and at what frequency.
+Honest scope: this is observation **metadata**, not decoded frames.
+
+Two versioned-service lessons came free:
+
+- **The API changed under us.** The first run hit HTTP 400: SatNOGS now
+  rejects the `page=N` parameter it previously supported. The collector
+  now samples whatever the first page returns — a rolling 25-observation
+  sample — and treats a changing service surface as a soft constraint,
+  never a pipeline failure. Always probe a public API before and after
+  wiring it in; they do not stay still.
+- **`sat_id` became a string.** The API changed this field from an
+  integer to a UUID string (`HADL-0708-3181-3728-3212`). The history
+  table's column widened to `VARCHAR` with an in-place migration, and
+  the loader stopped coercing it. The quality gate now guards the new
+  tables the same way it guards every other history table.
+
+### New Gold Tables, Chart, And Run Output
+
+Three new Gold tables export as CSV, and one new chart joins the report:
+
+```text
+data\gold\sw_index_daily.csv       Newest daily Kp/Ap/F10.7 per date
+data\gold\satnogs_activity.csv     Daily hears, satellites, stations
+data\gold\debris_population.csv    The 111-object debris cohort
+data\reports\sw_indices_timeline.png  Kp sum and F10.7 over 5 years
+```
+
+The research report and console summary now print one section per pillar.
+A first look shows the dataset is immediately useful: the debris cohort
+carries the highest drag exposure (45.9% stale elements, median ORI 53.1),
+and its large disagreements already dominate the measured-pairs list —
+these are the objects whose decay should respond first when the daily
+indices rise.
+
+### Per-Source Rate Limits, Precisely
+
+`run_pipeline.py` now accepts a per-source interval: orbital groups and
+NOAA stay at two hours, SatNOGS at two hours, and the space-weather file
+at CelesTrak's own three-hour update cycle. One signature, one dry-run
+line per source:
+
+```text
+celestrak/iridium-33-debris: due (no previous snapshot)
+ingest_space_weather: not due (data\bronze\spaceweather\sw_....csv is recent; wait about 172 more minutes)
+ingest_satnogs: not due (data\bronze\satnogs\observations_....json is recent; wait about 116 more minutes)
+```
+
+### Lesson 23 Exercise
+
+1. Run `python src\run_pipeline.py --dry-run` and find the three new
+   per-source lines and their different intervals.
+2. Open `data\gold\sw_index_daily.csv` and find the strongest day in the
+   last five years by `kp_sum`; confirm it matches the 2024-05-11 storm.
+3. Open `data\reports\sw_indices_timeline.png` and relate F10.7's rise to
+   the solar cycle phase.
+4. Open `data\gold\debris_population.csv` and confirm every object shares
+   one tight altitude band.
+5. Explain why the satellite id column is `VARCHAR` and why the SatNOGS
+   collector fetches one page instead of two.
 
 ## The Roadmap Complete
 

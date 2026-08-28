@@ -19,7 +19,13 @@ LOG_PATH = LOG_DIR / "pipeline_runs.jsonl"
 LOCK_PATH = LOG_DIR / "pipeline.lock"
 STALE_LOCK_MINUTES = 30
 MIN_COLLECTION_INTERVAL = timedelta(hours=2)
+# CelesTrak's space-weather index file updates every three hours, which is
+# its own rate-limit interval; every other source follows the two-hour
+# minimum used by the orbital catalog.
+SPACE_WEATHER_INTERVAL = timedelta(hours=3)
 NOAA_PATTERN = "data/bronze/noaa/magnetic_field_*.json"
+SPACE_WEATHER_PATTERN = "data/bronze/spaceweather/sw_*.csv"
+SATNOGS_PATTERN = "data/bronze/satnogs/observations_*.json"
 
 
 def acquire_lock() -> bool:
@@ -50,14 +56,18 @@ def snapshot_age(path: Path | None, now: datetime) -> timedelta | None:
     return now - modified
 
 
-def is_due(pattern: str, now: datetime) -> tuple[bool, str]:
+def is_due(
+    pattern: str,
+    now: datetime,
+    interval: timedelta = MIN_COLLECTION_INTERVAL,
+) -> tuple[bool, str]:
     latest = latest_snapshot(pattern)
     age = snapshot_age(latest, now)
     if latest is None or age is None:
         return True, "no previous snapshot"
-    if age >= MIN_COLLECTION_INTERVAL:
+    if age >= interval:
         return True, f"latest snapshot is {age.total_seconds() / 3600:.2f} hours old"
-    wait = MIN_COLLECTION_INTERVAL - age
+    wait = interval - age
     minutes = max(1, int(wait.total_seconds() / 60) + 1)
     relative = latest.relative_to(ROOT)
     return False, f"{relative} is recent; wait about {minutes} more minutes"
@@ -168,6 +178,10 @@ def run_pipeline(args: argparse.Namespace) -> int:
             due_groups.append(group)
     noaa_due, noaa_reason = is_due(NOAA_PATTERN, now)
     print(f"  ingest_noaa: {'due' if noaa_due else 'not due'} ({noaa_reason})")
+    sw_due, sw_reason = is_due(SPACE_WEATHER_PATTERN, now, SPACE_WEATHER_INTERVAL)
+    print(f"  ingest_space_weather: {'due' if sw_due else 'not due'} ({sw_reason})")
+    satnogs_due, satnogs_reason = is_due(SATNOGS_PATTERN, now)
+    print(f"  ingest_satnogs: {'due' if satnogs_due else 'not due'} ({satnogs_reason})")
 
     if args.dry_run:
         print("Dry run only: no network requests or database changes were made.")
@@ -201,6 +215,30 @@ def run_pipeline(args: argparse.Namespace) -> int:
             return 1
     else:
         log_skip(run_id, "ingest_noaa", noaa_reason)
+
+    if sw_due:
+        if not run_step(
+            run_id,
+            "ingest_space_weather",
+            "ingest_space_weather.py",
+            timeout=300,
+        ):
+            print("Pipeline stopped because ingestion failed.", file=sys.stderr)
+            return 1
+    else:
+        log_skip(run_id, "ingest_space_weather", sw_reason)
+
+    if satnogs_due:
+        if not run_step(
+            run_id,
+            "ingest_satnogs",
+            "ingest_satnogs.py",
+            timeout=300,
+        ):
+            print("Pipeline stopped because ingestion failed.", file=sys.stderr)
+            return 1
+    else:
+        log_skip(run_id, "ingest_satnogs", satnogs_reason)
 
     for name, script, skipped_codes in [
         ("load_history", "load_history.py", ()),

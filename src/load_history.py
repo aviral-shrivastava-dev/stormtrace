@@ -134,6 +134,35 @@ def setup(connection: duckdb.DuckDBPyConnection) -> None:
             source_file VARCHAR,
             source_sha256 VARCHAR
         );
+        CREATE TABLE IF NOT EXISTS space_weather_index_history (
+            snapshot_at_utc TIMESTAMPTZ,
+            observation_date DATE,
+            kp1 DOUBLE, kp2 DOUBLE, kp3 DOUBLE, kp4 DOUBLE,
+            kp5 DOUBLE, kp6 DOUBLE, kp7 DOUBLE, kp8 DOUBLE,
+            kp_sum DOUBLE,
+            ap_avg DOUBLE,
+            sunspot_number DOUBLE,
+            f10_7_observed DOUBLE,
+            f10_7_data_type VARCHAR,
+            source_file VARCHAR,
+            source_sha256 VARCHAR
+        );
+        CREATE TABLE IF NOT EXISTS satnogs_observation_history (
+            snapshot_at_utc TIMESTAMPTZ,
+            observation_id BIGINT,
+            start_utc TIMESTAMP,
+            end_utc TIMESTAMP,
+            status VARCHAR,
+            norad_catalog_id BIGINT,
+            satellite_id VARCHAR,
+            station_id BIGINT,
+            station_lat DOUBLE,
+            station_lng DOUBLE,
+            observation_frequency_hz DOUBLE,
+            transmitter_mode VARCHAR,
+            source_file VARCHAR,
+            source_sha256 VARCHAR
+        );
         """
     )
     # Migration for databases created before the source_group column existed.
@@ -174,6 +203,22 @@ def setup(connection: duckdb.DuckDBPyConnection) -> None:
         connection.execute("DELETE FROM orbital_snapshot_history")
         connection.execute(
             "DELETE FROM bronze_file_registry WHERE source = 'celestrak'"
+        )
+    # Migration for the SatNOGS satellite id: the network API changed this
+    # field from an integer to a string UUID, so the column widened to
+    # VARCHAR. The table was never populated as BIGINT (the new loader
+    # appeared with the new API), so an in-place type change is safe.
+    satnogs_columns = {
+        row[0]: row[1]
+        for row in connection.execute(
+            "DESCRIBE satnogs_observation_history"
+        ).fetchall()
+    }
+    satnogs_id_type = satnogs_columns.get("satellite_id", "").upper()
+    if satnogs_id_type.startswith("BIGINT"):
+        connection.execute(
+            "ALTER TABLE satnogs_observation_history "
+            "ALTER COLUMN satellite_id TYPE VARCHAR"
         )
 
 
@@ -311,6 +356,124 @@ def _load_file_rows(
                     )
                 )
         insert_rows(connection, table, ORBITAL_COLUMNS, rows)
+    elif source == "spaceweather":
+        # CelesTrak space-weather indices. Rows are daily and mostly
+        # static, but the most recent day is provisional and revised
+        # between updates. Content-hash dedupe: a row is inserted only
+        # when (date, values) has never been seen, so revisions append
+        # new versions while unchanged history is skipped. Gold tables
+        # select the latest snapshot per date.
+        table = "space_weather_index_history"
+        existing = {
+            (row[0], row[1])
+            for row in connection.execute(
+                "SELECT CAST(observation_date AS VARCHAR), "
+                "md5(concat_ws('|', kp1, kp2, kp3, kp4, kp5, kp6, kp7, kp8, "
+                "kp_sum, ap_avg, sunspot_number, f10_7_observed, "
+                "f10_7_data_type)) "
+                "FROM space_weather_index_history"
+            ).fetchall()
+        }
+        with path.open(encoding="utf-8-sig", newline="") as file:
+            for item in csv.DictReader(file):
+                if not (item.get("KP1") or "").strip():
+                    continue  # forecast rows carry no indices
+                observation_date = (item.get("DATE") or "").strip()
+                if not observation_date:
+                    continue
+                values = (
+                    number(item.get("KP1")), number(item.get("KP2")),
+                    number(item.get("KP3")), number(item.get("KP4")),
+                    number(item.get("KP5")), number(item.get("KP6")),
+                    number(item.get("KP7")), number(item.get("KP8")),
+                    number(item.get("KP_SUM")), number(item.get("AP_AVG")),
+                    number(item.get("ISN")), number(item.get("F10.7_OBS")),
+                    (item.get("F10.7_DATA_TYPE") or "").strip() or None,
+                )
+                row_digest = hashlib.md5(
+                    "|".join("" if value is None else str(value) for value in values)
+                    .encode("utf-8")
+                ).hexdigest()
+                if (observation_date, row_digest) in existing:
+                    continue
+                existing.add((observation_date, row_digest))
+                rows.append(
+                    (captured_at, observation_date, *values, relative, digest)
+                )
+        insert_rows(
+            connection,
+            table,
+            [
+                "snapshot_at_utc", "observation_date",
+                "kp1", "kp2", "kp3", "kp4", "kp5", "kp6", "kp7", "kp8",
+                "kp_sum", "ap_avg", "sunspot_number",
+                "f10_7_observed", "f10_7_data_type",
+                "source_file", "source_sha256",
+            ],
+            rows,
+        )
+    elif source == "satnogs":
+        # SatNOGS observation metadata. Observations are keyed by id and
+        # change status over their life (future -> good/bad/...), so the
+        # same content-hash dedupe applies: new (id, content) combos
+        # append; unchanged observations are skipped.
+        table = "satnogs_observation_history"
+        records = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(records, list):
+            raise ValueError(f"Unsupported SatNOGS Bronze payload: {relative}")
+        existing = {
+            (row[0], row[1])
+            for row in connection.execute(
+                "SELECT observation_id, "
+                "md5(concat_ws('|', start_utc, end_utc, status, "
+                "norad_catalog_id, satellite_id, station_id, station_lat, "
+                "station_lng, observation_frequency_hz, transmitter_mode)) "
+                "FROM satnogs_observation_history"
+            ).fetchall()
+        }
+        for item in records:
+            observation_id = integer(item.get("id"))
+            if observation_id is None:
+                continue
+            values = (
+                item.get("start"),
+                item.get("end"),
+                item.get("status"),
+                integer(item.get("norad_cat_id")),
+                item.get("sat_id"),
+                integer(item.get("ground_station")),
+                number(item.get("station_lat")),
+                number(item.get("station_lng")),
+                number(item.get("observation_frequency")),
+                item.get("transmitter_mode"),
+            )
+            row_digest = hashlib.md5(
+                "|".join("" if value is None else str(value) for value in values)
+                .encode("utf-8")
+            ).hexdigest()
+            if (observation_id, row_digest) in existing:
+                continue
+            existing.add((observation_id, row_digest))
+            rows.append(
+                (
+                    captured_at,
+                    observation_id,
+                    *values,
+                    relative,
+                    digest,
+                )
+            )
+        insert_rows(
+            connection,
+            table,
+            [
+                "snapshot_at_utc", "observation_id", "start_utc", "end_utc",
+                "status", "norad_catalog_id", "satellite_id", "station_id",
+                "station_lat", "station_lng", "observation_frequency_hz",
+                "transmitter_mode", "source_file", "source_sha256",
+            ],
+            rows,
+        )
     else:
         records = json.loads(path.read_text(encoding="utf-8"))
         if source != "noaa" or not isinstance(records, list):
@@ -357,6 +520,8 @@ def main() -> int:
     files = celestrak_files
     files += sorted(BRONZE.glob("noaa/magnetic_field_*.json"))
     files += sorted(BRONZE.glob("noaa/plasma_*.json"))
+    files += sorted(BRONZE.glob("spaceweather/sw_*.csv"))
+    files += sorted(BRONZE.glob("satnogs/observations_*.json"))
     if not files:
         print("No Bronze snapshots found. Run Lessons 1 and 2 first.", file=sys.stderr)
         return 1

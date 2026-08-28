@@ -18,6 +18,7 @@ DATABASE = ROOT / "data" / "stormtrace.duckdb"
 SQL_PATH = ROOT / "sql" / "lesson8_research.sql"
 FRESHNESS_SQL_PATH = ROOT / "sql" / "lesson11_freshness.sql"
 RELIABILITY_SQL_PATH = ROOT / "sql" / "lesson12_reliability.sql"
+PILLARS_SQL_PATH = ROOT / "sql" / "lesson23_pillars.sql"
 REPORTS_DIR = ROOT / "data" / "reports"
 GOLD_DIR = ROOT / "data" / "gold"
 
@@ -70,6 +71,57 @@ def chart_space_weather(connection: duckdb.DuckDBPyConnection) -> Path | None:
     figure.autofmt_xdate()
     figure.tight_layout()
     path = REPORTS_DIR / "space_weather_timeline.png"
+    figure.savefig(path, dpi=120)
+    plt.close(figure)
+    return path
+
+
+def chart_sw_index_daily(connection: duckdb.DuckDBPyConnection) -> Path | None:
+    if not table_exists(connection, "gold_sw_index_daily"):
+        return None
+    rows = fetch_rows(
+        connection,
+        """
+        SELECT
+            observation_date,
+            kp_sum,
+            ap_avg,
+            f10_7_observed
+        FROM gold_sw_index_daily
+        WHERE f10_7_observed IS NOT NULL OR kp_sum IS NOT NULL
+        ORDER BY observation_date
+        """,
+    )
+    if not rows:
+        return None
+
+    from datetime import date
+
+    dates = [row[0] for row in rows]
+    kp_sums = [float(row[1]) if row[1] is not None else None for row in rows]
+    f10_7_values = [
+        float(row[3]) if row[3] is not None else None for row in rows
+    ]
+
+    figure, axis_f10 = plt.subplots(figsize=(12, 6))
+    axis_kp = axis_f10.twinx()
+
+    axis_kp.bar(dates, kp_sums, width=1.0, color="tab:blue", alpha=0.55, label="Daily Kp sum")
+    axis_f10.plot(
+        dates, f10_7_values, color="tab:red", linewidth=1.2, label="F10.7 (observed)"
+    )
+    axis_kp.axhline(y=30, color="gray", linestyle="--", linewidth=1, label="Kp sum 30 guide")
+    axis_kp.set_ylabel("Daily Kp sum")
+    axis_f10.set_ylabel("F10.7 solar flux (sfu)")
+    axis_f10.set_xlabel("Date (UTC)")
+    axis_f10.set_title("Daily Space-Weather Indices: Kp and Solar Radio Flux F10.7")
+    lines_kp, labels_kp = axis_kp.get_legend_handles_labels()
+    lines_f10, labels_f10 = axis_f10.get_legend_handles_labels()
+    axis_f10.legend(lines_kp + lines_f10, labels_kp + labels_f10, loc="upper left")
+    axis_kp.grid(alpha=0.3)
+
+    figure.tight_layout()
+    path = REPORTS_DIR / "sw_indices_timeline.png"
     figure.savefig(path, dpi=120)
     plt.close(figure)
     return path
@@ -366,6 +418,66 @@ def chart_ori_validation(connection: duckdb.DuckDBPyConnection) -> Path | None:
     figure.savefig(path, dpi=120)
     plt.close(figure)
     return path
+
+
+def sw_index_summary(connection: duckdb.DuckDBPyConnection) -> dict[str, object]:
+    if not table_exists(connection, "gold_sw_index_daily"):
+        return {}
+    relation = connection.sql(
+        """
+        SELECT
+            MIN(observation_date) AS first_date,
+            MAX(observation_date) AS last_date,
+            COUNT(*) AS day_count,
+            ROUND(MAX(kp_sum), 2) AS max_kp_sum,
+            ROUND(MAX(ap_avg), 2) AS max_ap_avg,
+            ROUND(MIN(f10_7_observed), 2) AS min_f10_7,
+            ROUND(MAX(f10_7_observed), 2) AS max_f10_7
+        FROM gold_sw_index_daily
+        """
+    )
+    row = relation.fetchone()
+    return dict(zip(relation.columns, row))
+
+
+def satnogs_summary(connection: duckdb.DuckDBPyConnection) -> dict[str, object]:
+    if not table_exists(connection, "gold_satnogs_activity"):
+        return {}
+    relation = connection.sql(
+        """
+        SELECT
+            MIN(observation_date) AS first_date,
+            MAX(observation_date) AS last_date,
+            COUNT(*) AS day_count,
+            SUM(observation_count) AS total_observations,
+            SUM(good_count) AS total_good,
+            SUM(distinct_satellites) AS satellite_hears_seen,
+            SUM(distinct_stations) AS station_hears_seen
+        FROM gold_satnogs_activity
+        """
+    )
+    row = relation.fetchone()
+    return dict(zip(relation.columns, row))
+
+
+def debris_summary(connection: duckdb.DuckDBPyConnection) -> dict[str, object]:
+    if not table_exists(connection, "gold_debris_population"):
+        return {}
+    relation = connection.sql(
+        """
+        SELECT
+            COUNT(*) AS object_count,
+            ROUND(MIN(mean_altitude_km), 1) AS min_altitude_km,
+            ROUND(MAX(mean_altitude_km), 1) AS max_altitude_km,
+            ROUND(MEDIAN(mean_altitude_km), 1) AS median_altitude_km,
+            ROUND(MEDIAN(bstar_drag_term), 6) AS median_bstar,
+            ROUND(MEDIAN(eccentricity), 6) AS median_eccentricity,
+            ROUND(MAX(element_age_hours), 2) AS oldest_element_hours
+        FROM gold_debris_population
+        """
+    )
+    row = relation.fetchone()
+    return dict(zip(relation.columns, row))
 
 
 def space_weather_summary(connection: duckdb.DuckDBPyConnection) -> dict[str, object]:
@@ -810,6 +922,77 @@ def write_report(
         "storm classifications: hourly average Bz below -5 nT or hourly",
         "average proton speed above 500 km/s.",
         "",
+        "## The Three-Pillar Research Dataset",
+        "",
+    ]
+    sw_index = sw_index_summary(connection)
+    if sw_index:
+        lines += [
+            "### Daily Solar and Geomagnetic Indices (CelesTrak)",
+            "",
+            "The classic drivers of thermospheric density: the eight 3-hour",
+            "planetary K indices (summed here), their Ap average, and the",
+            "observed 10.7 cm solar radio flux. Physical chain: more solar",
+            "activity -> hotter, denser upper atmosphere -> more drag on",
+            "low orbits.",
+            "",
+            f"- Days with indices: {sw_index['day_count']:,} "
+            f"({sw_index['first_date']} to {sw_index['last_date']})",
+            f"- Maximum daily Kp sum: {sw_index['max_kp_sum']}",
+            f"- Maximum daily Ap average: {sw_index['max_ap_avg']}",
+            f"- F10.7 range: {sw_index['min_f10_7']} - {sw_index['max_f10_7']} sfu",
+            "",
+            "The most recent day is provisional and is revised between",
+            "CelesTrak updates; each revision is kept in history. These are",
+            "the explanatory variables the orbit and telemetry pillars will",
+            "be joined against.",
+            "",
+        ]
+    debris = debris_summary(connection)
+    if debris:
+        lines += [
+            "### The Debris Population (iridium-33-debris group)",
+            "",
+            "Debris from a single collision: a tight altitude band, objects",
+            "that never maneuver, and a drag signal uncontaminated by",
+            "station-keeping. The cleanest natural experiment in the catalog.",
+            "",
+            f"- Objects tracked: {debris['object_count']:,}",
+            f"- Altitude range: {debris['min_altitude_km']} to "
+            f"{debris['max_altitude_km']} km "
+            f"(median {debris['median_altitude_km']} km)",
+            f"- Median bstar: {debris['median_bstar']}",
+            f"- Median eccentricity: {debris['median_eccentricity']}",
+            f"- Oldest element in the cohort: {debris['oldest_element_hours']} h",
+            "",
+            "Because this population sits just above the drag-dominated",
+            "regime and never maneuvers, its orbit-height trend is the most",
+            "direct drag meter StormTrace has.",
+            "",
+        ]
+    satnogs = satnogs_summary(connection)
+    if satnogs:
+        lines += [
+            "### SatNOGS Observation Activity",
+            "",
+            "Independent, crowd-sourced telemetry evidence: volunteers'",
+            "ground stations report when satellites are heard and at what",
+            "frequency. Scope, honestly stated: metadata, not decoded frames.",
+            "",
+            f"- Observation days: {satnogs['day_count']:,} "
+            f"({satnogs['first_date']} to {satnogs['last_date']})",
+            f"- Observations sampled: {satnogs['total_observations']:,} "
+            f"({satnogs['total_good']:,} good)",
+            f"- Distinct satellites heard: {satnogs['satellite_hears_seen']:,}",
+            f"- Distinct ground stations heard: {satnogs['station_hears_seen']:,}",
+            "",
+            "Coverage is a polite rolling sample (two API pages per run),",
+            "enough to quantify tracking activity before and during",
+            "disturbances, not to reconstruct full telemetry history.",
+            "",
+        ]
+
+    lines += [
         "## Charts",
         "",
     ]
@@ -856,6 +1039,7 @@ def main() -> int:
         connection.execute(SQL_PATH.read_text(encoding="utf-8"))
         connection.execute(FRESHNESS_SQL_PATH.read_text(encoding="utf-8"))
         connection.execute(RELIABILITY_SQL_PATH.read_text(encoding="utf-8"))
+        connection.execute(PILLARS_SQL_PATH.read_text(encoding="utf-8"))
         GOLD_DIR.mkdir(parents=True, exist_ok=True)
         for table, filename in [
             ("gold_element_freshness", "element_freshness.csv"),
@@ -864,6 +1048,9 @@ def main() -> int:
             ("gold_orbit_reliability_index", "orbit_reliability_index.csv"),
             ("gold_reliability_class_summary", "reliability_class_summary.csv"),
             ("gold_reliability_group_summary", "reliability_group_summary.csv"),
+            ("gold_sw_index_daily", "sw_index_daily.csv"),
+            ("gold_satnogs_activity", "satnogs_activity.csv"),
+            ("gold_debris_population", "debris_population.csv"),
         ]:
             connection.execute(
                 f"COPY {table} TO ? (HEADER, DELIMITER ',')",
@@ -891,6 +1078,7 @@ def main() -> int:
         chart_paths: list[Path] = []
         for name, chart in [
             ("space weather timeline", chart_space_weather(connection)),
+            ("space-weather index timeline", chart_sw_index_daily(connection)),
             ("orbit altitude distribution", chart_orbit_population(connection)),
             ("orbit decay rates", chart_orbit_change(connection)),
             ("element freshness", chart_element_freshness(connection)),
@@ -951,6 +1139,9 @@ def main() -> int:
                     "SELECT metric, value FROM gold_ori_validation_stats",
                 )
             )
+        sw_index_console = sw_index_summary(connection)
+        debris_console = debris_summary(connection)
+        satnogs_console = satnogs_summary(connection)
     except (duckdb.Error, OSError, ValueError) as error:
         print(f"Research analysis error: {error}", file=sys.stderr)
         return 1
@@ -1001,6 +1192,31 @@ def main() -> int:
             print(f"  Spearman score vs error: {score_corr} (negative is correct)")
         if age_corr is not None:
             print(f"  Spearman element age vs error: {age_corr} (positive is correct)")
+        print()
+    sw_index = sw_index_console
+    if sw_index:
+        print("Daily space-weather indices (CelesTrak):")
+        print(f"  Days: {sw_index['day_count']:,} "
+              f"({sw_index['first_date']} to {sw_index['last_date']})")
+        print(f"  Max Kp sum: {sw_index['max_kp_sum']}, "
+              f"max Ap {sw_index['max_ap_avg']}, "
+              f"F10.7 {sw_index['min_f10_7']}-{sw_index['max_f10_7']} sfu")
+        print()
+    debris = debris_console
+    if debris:
+        print("Debris population (iridium-33-debris group):")
+        print(f"  Objects: {debris['object_count']:,}, "
+              f"altitude {debris['min_altitude_km']}-{debris['max_altitude_km']} km, "
+              f"median bstar {debris['median_bstar']}")
+        print()
+    satnogs = satnogs_console
+    if satnogs:
+        print("SatNOGS observation activity:")
+        print(f"  Observations: {satnogs['total_observations']:,} "
+              f"({satnogs['total_good']:,} good), days "
+              f"{satnogs['first_date']} to {satnogs['last_date']}")
+        print(f"  Distinct satellites heard: {satnogs['satellite_hears_seen']:,}, "
+              f"stations: {satnogs['station_hears_seen']:,}")
         print()
     if snapshot_count < 2:
         print("Orbit-change detection is ready but needs at least 2 snapshots.")
