@@ -51,6 +51,13 @@
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "textMode": "auto"
       },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_database_reachable",
+          "refId": "A"
+        }
+      ],
       "title": "Database",
       "type": "stat"
     },
@@ -76,6 +83,13 @@
         "graphMode": "none",
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
       },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_quality_failures",
+          "refId": "A"
+        }
+      ],
       "title": "Quality Failures",
       "type": "stat"
     },
@@ -105,6 +119,13 @@
         "graphMode": "none",
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
       },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_environment_factor",
+          "refId": "A"
+        }
+      ],
       "title": "Environment Factor",
       "type": "stat"
     },
@@ -119,6 +140,13 @@
         "graphMode": "area",
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
       },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_objects_tracked",
+          "refId": "A"
+        }
+      ],
       "title": "Objects Tracked",
       "type": "stat"
     },
@@ -133,6 +161,13 @@
         "graphMode": "area",
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
       },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_disagreement_pairs",
+          "refId": "A"
+        }
+      ],
       "title": "Measured Pairs",
       "type": "stat"
     },
@@ -150,6 +185,13 @@
         "graphMode": "area",
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
       },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_disagreement_median_km",
+          "refId": "A"
+        }
+      ],
       "title": "Median Disagreement",
       "type": "stat"
     },
@@ -176,15 +218,38 @@
         "colorMode": "value",
         "graphMode": "none",
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "textMode": "auto",
         "orientation": "horizontal"
       },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "stormtrace_validation_metric{metric=~\"spearman.*\"}",
-          "legendFormat": "{{metric}}",
+          "expr": "stormtrace_validation_metric{metric=\"spearman_score_vs_total_km\"}",
+          "legendFormat": "score vs error (all pairs)",
           "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_validation_metric{metric=\"spearman_score_vs_total_km_drag_like\"}",
+          "legendFormat": "score vs error (drag-like)",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_validation_metric{metric=\"spearman_age_vs_total_km\"}",
+          "legendFormat": "age vs error",
+          "refId": "C"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_validation_metric{metric=\"spearman_score_vs_km_per_hour\"}",
+          "legendFormat": "score vs rate",
+          "refId": "D"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_validation_metric{metric=\"spearman_altitude_vs_total_km_drag_like\"}",
+          "legendFormat": "altitude vs error (drag-like)",
+          "refId": "E"
         }
       ],
       "title": "ORI Validation (Spearman)",
@@ -236,6 +301,13 @@
         "graphMode": "none",
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
       },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_disagreement_max_km",
+          "refId": "A"
+        }
+      ],
       "title": "Max Disagreement",
       "type": "stat"
     },

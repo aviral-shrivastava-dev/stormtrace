@@ -263,6 +263,11 @@ def metrics() -> Response:
         database_reachable.set(0)
     except duckdb.Error:
         database_reachable.set(0)
+    except HTTPException:
+        # Database file missing: report unreachable instead of failing the
+        # scrape. Prometheus semantics: the endpoint must render, and the
+        # metric carries the signal -- an absent metric is the alert.
+        database_reachable.set(0)
 
     if QUALITY_REPORT.exists():
         report = json.loads(QUALITY_REPORT.read_text(encoding="utf-8"))

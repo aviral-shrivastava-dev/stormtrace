@@ -1629,6 +1629,40 @@ and constructing the same metric name twice in one registry raises
 `DuplicateTimeseries` — so labeled gauges are built once per
 (name, label-shape) and cached.
 
+### The No-Data Incident (and the verification it forced)
+
+The first deployment rendered eight panels as "No data" while others
+worked. Investigation traced two distinct causes:
+
+1. **Seven stat panels had no query targets at all.** They were authored
+   with thresholds, units, and descriptions — everything except the
+   `targets` array that tells Grafana what to query. A panel with display
+   configuration but no query always renders "No data": Grafana cannot
+   display what it never asked for. The panels that worked were exactly
+   the ones that had targets.
+2. **The ORI Validation panel used a pattern unlike any working panel**:
+   a single regex target returning five identically-named series with a
+   label-interpolated legend and a non-default text mode. The data chain
+   was verified healthy end-to-end — the API emitted the metrics,
+   Prometheus returned five series, and Grafana's own `/api/ds/query`
+   returned frames with values — so the panel was rebuilt in the
+   structure proven to render on this Grafana version: separate targets
+   with explicit label matchers and static legend formats, exactly like
+   the working Space Weather panel.
+
+The process lesson is the point: verifying that a provisioned dashboard
+*exists* with N panels is not verification. A new tool now guards this:
+
+```powershell
+python src\verify_dashboard.py
+```
+
+It fetches the dashboard Grafana actually serves and runs every panel's
+expressions through Grafana's own query API — the same path the browser
+panels use — then fails if any panel has no targets or any target returns
+no data. Run it after every dashboard change; it would have caught this
+incident before any screenshot did.
+
 ### The Dashboard
 
 Eleven panels:
@@ -1656,6 +1690,8 @@ is the exact event the project is still waiting to capture.
    `stormtrace_disagreement_median_km`.
 5. Explain why the metrics endpoint must not raise 503 when the database
    is busy.
+6. Run `python src\verify_dashboard.py`, then delete one panel's targets
+   from the dashboard JSON and confirm the script fails on it.
 
 ## The Roadmap Complete
 
