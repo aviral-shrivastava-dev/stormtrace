@@ -234,6 +234,32 @@ def load_file(connection: duckdb.DuckDBPyConnection, path: Path) -> int:
             raise ValueError(f"Immutable Bronze file was modified: {relative}")
         return 0
 
+    # Atomicity: a file's rows and its registry entry are committed together
+    # in one transaction. If the process dies mid-file (timeout, crash,
+    # power loss), the uncommitted transaction is discarded when the database
+    # reopens, so a partially loaded file can never leave orphan rows that a
+    # later run would duplicate. Each chunked INSERT is otherwise its own
+    # auto-committed transaction, which is exactly how a partial load once
+    # slipped through.
+    connection.execute("BEGIN TRANSACTION")
+    try:
+        row_count = _load_file_rows(connection, path, relative, digest)
+        connection.execute("COMMIT")
+    except BaseException:
+        try:
+            connection.execute("ROLLBACK")
+        except duckdb.Error:
+            pass  # transaction already aborted by the failing statement
+        raise
+    return row_count
+
+
+def _load_file_rows(
+    connection: duckdb.DuckDBPyConnection,
+    path: Path,
+    relative: str,
+    digest: str,
+) -> int:
     source = path.parent.name
     captured_at = snapshot_time(path)
     rows: list[tuple] = []

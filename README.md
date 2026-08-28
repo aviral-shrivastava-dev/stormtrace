@@ -65,15 +65,20 @@ Outputs land in `data\gold\` (CSV tables) and `data\reports\` (charts and
 - **Source update frequency ≠ data change frequency**: consecutive snapshots
   can contain byte-identical element sets; measured "zero drag" was correctly
   reported as republished data, not as a physical measurement.
-- **Element freshness varies by object class**: median public element age is
-  ~16 hours; roughly a quarter of tracked objects carry elements older than
-  24 hours, and one object (CROCUBE) carried a 66-hour-old element.
+- **Real propagation disagreement measured**: across 132 refreshed element
+  pairs (median span 16.3 h), the median SGP4 disagreement is 0.56 km, and
+  the RIC decomposition separates drag (along-track dominant, e.g. SWIFT)
+  from maneuvers (radial-dominant, e.g. the MMS formation).
+- **Element freshness varies by object class**: median public element age
+  is 9-18 hours depending on group; science satellites are tracked best,
+  and roughly a quarter of cubesats carry elements older than 24 hours.
 - **Low altitude dominates unreliability**: the ISS scores only "reduced"
   reliability (ORI 48/100) not from poor data but because ~418 km altitude is
   the most drag-sensitive regime — the same physics that forces frequent
   station reboosts.
 - **Reliability varies by population**: station-group objects score worse
-  (median ORI 43.6) than cubesats (54.4) purely through orbital regime.
+  (median ORI 45.0) than cubesats (61.1) and science satellites (68.4)
+  purely through orbital regime.
 
 ## Repository Structure
 
@@ -192,12 +197,13 @@ Phases 1-7 below are complete; later phases build on them.
 | 13 | GitHub packaging | Version control, reproducibility | Git | Done |
 | 14 | Science group and continuous integration | Population growth, CI discipline | GitHub Actions | Done |
 | 15 | SGP4 propagation disagreement | Orbit propagation, RIC frames, migration | sgp4 | Done |
-| 16 | Validate ORI against measurements | Backtesting, calibration | Python | Planned |
-| 17 | Move data into a local lakehouse | Object storage, table formats | Docker, MinIO, Iceberg | Planned |
-| 18 | Process larger history | Distributed processing | Spark | Planned |
-| 19 | Add real-time events | Streaming and event time | Kafka/Redpanda | Planned |
-| 20 | Create models | Features, backtests, model tracking | scikit-learn, MLflow | Planned |
-| 21 | Publish a usable product | APIs, dashboards, monitoring | FastAPI, Grafana | Planned |
+| 16 | First real measurements, partial-load incident | Transactions, atomicity, incident response | DuckDB | Done |
+| 17 | Validate ORI against measurements | Backtesting, calibration | Python | Planned |
+| 18 | Move data into a local lakehouse | Object storage, table formats | Docker, MinIO, Iceberg | Planned |
+| 19 | Process larger history | Distributed processing | Spark | Planned |
+| 20 | Add real-time events | Streaming and event time | Kafka/Redpanda | Planned |
+| 21 | Create models | Features, backtests, model tracking | scikit-learn, MLflow | Planned |
+| 22 | Publish a usable product | APIs, dashboards, monitoring | FastAPI, Grafana | Planned |
 
 ## Rules For Scientific Honesty
 
@@ -1080,3 +1086,91 @@ Index will be validated against.
 4. Explain why the later element is not treated as ground truth.
 5. Watch for the first measurable pair after the catalog refreshes, then
    compare its span hours with its total km.
+
+## Lesson 16: First Real Measurements And The Partial-Load Incident
+
+The laptop slept for twelve hours. When it woke, the scheduler's catch-up
+run downloaded three fresh CelesTrak groups plus NOAA data — and then
+`load_history` was killed by the orchestrator's 180-second timeout, mid-file.
+What followed was a complete production incident, a self-healing system, a
+repair that made things worse before making them better, and finally the
+project's first real scientific measurements.
+
+### The Incident Timeline
+
+1. **06:41 UTC** — the catch-up run downloads everything, then
+   `load_history` starts loading. Each 500-row chunk INSERT is its own
+   auto-committed transaction. The timeout kills the process after one
+   plasma chunk (500 rows) is committed but before the file is registered:
+   **500 orphan rows** — present in history, absent from the registry.
+2. **07:03 UTC** — the next hourly run finds the plasma file unregistered
+   and loads it completely and correctly, registering it. The system
+   **self-healed the load**, but the 500 orphans remain (the first 500
+   records of the file now exist twice).
+3. **The repair** — a diagnostic script counted 500 orphans; a cleanup
+   script then deleted rows by source file... but between diagnosis and
+   repair, step 2 had happened, so the delete removed 3,321 rows: the 500
+   orphans **plus the 2,821 good, registered rows**. The registry now
+   claimed rows that no longer existed.
+
+The deeper lesson: **a repair must re-verify state immediately before it
+acts, or delete surgically** (only rows not covered by the registry), never
+by broad match. Diagnosis and repair were two operations with the world
+changing in between.
+
+### The Fixes
+
+1. **Per-file transactions.** A file's rows and its registry entry now
+   commit atomically. A process killed mid-file leaves an uncommitted
+   transaction that DuckDB discards on reopen — orphan rows are now
+   structurally impossible.
+2. **Two new quality checks.** `orphan_history_rows` (history rows with no
+   registry entry) and `registered_files_missing_rows` (registry entries
+   with no history rows) guard the invariant in both directions. Either
+   failure mode from this incident is now a red, blocking error.
+3. **Realistic timeouts.** A machine that just woke from sleep runs cold:
+   caches empty, antivirus scanning, twelve hours of files to checksum.
+   Step timeouts rose from 180s to 300-600s.
+4. **Retrograde epoch pairs.** The catalog sometimes republishes an element
+   whose epoch is *older* than the previously seen element. There is no
+   forward prediction to evaluate, so such pairs are counted and reported
+   (`Retrograde epoch pairs: 1`) instead of being silently measured or
+   silently dropped.
+5. **Pairs are not objects.** An object with three snapshots yields two
+   pairs, and a report once showed "awaiting a second snapshot: -26".
+   Counts now distinguish objects from element-set pairs.
+
+### The First Real Measurements
+
+With 133 objects holding refreshed element sets, both instruments produced
+real data:
+
+```text
+SGP4 propagation disagreement: 132 measured pairs
+  median total 0.556 km, max 156.43 km, median span 16.26 h
+Orbit decay: SNAP-3 EDDIE 3.14 km/day, DUCHIFAT-1 2.13 km/day,
+  SWIFT 1.88 km/day
+```
+
+The RIC decomposition immediately separated two physical causes:
+
+- **SWIFT**: 50.3 km disagreement, almost purely along-track (radial 0.37
+  km) — the textbook **drag signature**.
+- **MMS 1-4**: ~150 km disagreement dominated by the radial component, and
+  apparent "decay" of ~1,089 km/day — these are formation-flying spacecraft
+  in highly elliptical orbits performing **maneuvers**, not decaying.
+
+An instrument that distinguishes maneuvers from drag by component shape is
+doing exactly what a research instrument should.
+
+### Lesson 16 Exercise
+
+1. Read `src\load_history.py` and find where the transaction begins and
+   commits. Explain why the registry insert must be inside it.
+2. Read the two new checks in `src\check_quality.py` and explain what each
+   direction of the invariant catches.
+3. Open `data\reports\propagation_disagreement.png` and find the MMS
+   outliers.
+4. Explain why SWIFT's disagreement shape differs from MMS's.
+5. Explain why "delete rows where source_file is not in the registry" is a
+   safer repair than "delete rows where source_file equals X".

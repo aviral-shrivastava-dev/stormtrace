@@ -272,6 +272,57 @@ def chart_orbit_reliability(connection: duckdb.DuckDBPyConnection) -> Path | Non
     return path
 
 
+def table_exists(
+    connection: duckdb.DuckDBPyConnection, table_name: str
+) -> bool:
+    return (
+        connection.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+            [table_name],
+        ).fetchone()[0]
+        > 0
+    )
+
+
+def chart_propagation_disagreement(connection: duckdb.DuckDBPyConnection) -> Path | None:
+    if not table_exists(connection, "gold_propagation_disagreement"):
+        return None
+    rows = fetch_rows(
+        connection,
+        """
+        SELECT source_group, propagation_span_hours, total_km
+        FROM gold_propagation_disagreement
+        """,
+    )
+    if not rows:
+        return None
+
+    figure, axis = plt.subplots(figsize=(12, 6))
+    groups = sorted({str(row[0]) for row in rows})
+    colors = ["tab:blue", "tab:purple", "tab:cyan", "tab:olive"]
+    for index, group in enumerate(groups):
+        group_rows = [row for row in rows if str(row[0]) == group]
+        axis.scatter(
+            [float(row[1]) for row in group_rows],
+            [float(row[2]) for row in group_rows],
+            alpha=0.6,
+            s=30,
+            color=colors[index % len(colors)],
+            label=f"{group} (n={len(group_rows):,})",
+        )
+    axis.set_xlabel("Propagation span (hours)")
+    axis.set_ylabel("Total disagreement (km)")
+    axis.set_title("SGP4 Propagation Disagreement Between Consecutive Element Sets")
+    axis.set_yscale("log")
+    axis.legend()
+    axis.grid(alpha=0.3, which="both")
+    figure.tight_layout()
+    path = REPORTS_DIR / "propagation_disagreement.png"
+    figure.savefig(path, dpi=120)
+    plt.close(figure)
+    return path
+
+
 def space_weather_summary(connection: duckdb.DuckDBPyConnection) -> dict[str, object]:
     relation = connection.sql(
         """
@@ -359,24 +410,26 @@ def write_report(
             connection,
             """
             SELECT
-                COUNT(*) AS change_count,
-                COUNT(*) FILTER (WHERE same_element_set) AS same_set_count,
-                COUNT(*) FILTER (WHERE NOT same_element_set) AS refreshed_count
+                COUNT(DISTINCT norad_catalog_id) AS compared_objects,
+                COUNT(*) AS pair_count,
+                COUNT(*) FILTER (WHERE same_element_set) AS same_set_pairs,
+                COUNT(*) FILTER (WHERE NOT same_element_set) AS refreshed_pairs
             FROM gold_orbit_change
             """,
         )[0]
-        change_count, same_set_count, refreshed_count = refresh
-        awaiting = tracked_total - change_count
+        compared_objects, pair_count, same_set_pairs, refreshed_pairs = refresh
+        awaiting = max(0, tracked_total - compared_objects)
         lines += [
             "## Orbit Change Status",
             "",
-            f"- Objects compared (two or more snapshots): {change_count}",
+            f"- Objects with two or more snapshots: {compared_objects:,}",
+            f"- Element-set pairs compared: {pair_count:,}",
             f"- Objects awaiting a second snapshot: {awaiting:,}",
-            f"- Objects with refreshed element sets: {refreshed_count}",
-            f"- Objects with republished identical element sets: {same_set_count}",
+            f"- Pairs with refreshed element sets: {refreshed_pairs:,}",
+            f"- Pairs with republished identical element sets: {same_set_pairs:,}",
             "",
         ]
-        if refreshed_count == 0:
+        if refreshed_pairs == 0:
             lines += [
                 "NO NEW ELEMENT SETS BETWEEN SNAPSHOTS.",
                 "",
@@ -420,6 +473,82 @@ def write_report(
         ORDER BY source_group
         """,
     )
+    if table_exists(connection, "gold_propagation_disagreement"):
+        disagreement_stats = fetch_rows(
+            connection,
+            """
+            SELECT
+                COUNT(*),
+                ROUND(MEDIAN(propagation_span_hours), 2),
+                ROUND(MAX(propagation_span_hours), 2),
+                ROUND(MEDIAN(total_km), 3),
+                ROUND(MAX(total_km), 3),
+                ROUND(MEDIAN(along_track_km), 3),
+                ROUND(MEDIAN(radial_km), 3),
+                ROUND(MEDIAN(cross_track_km), 3)
+            FROM gold_propagation_disagreement
+            """,
+        )
+        if disagreement_stats and disagreement_stats[0][0]:
+            (
+                pair_count,
+                median_span,
+                max_span,
+                median_total,
+                max_total,
+                median_along,
+                median_radial,
+                median_cross,
+            ) = disagreement_stats[0]
+            lines += [
+                "## SGP4 Propagation Disagreement",
+                "",
+                "Measured drift between consecutive public element sets: the",
+                "earlier element was propagated with SGP4 to the later",
+                "element's epoch and compared against the later element's own",
+                "position, decomposed in the RIC frame.",
+                "",
+                "| Metric | Value |",
+                "|---|---:|",
+                f"| Measured pairs | {pair_count:,} |",
+                f"| Median propagation span | {median_span} h |",
+                f"| Maximum propagation span | {max_span} h |",
+                f"| Median total disagreement | {median_total} km |",
+                f"| Maximum total disagreement | {max_total} km |",
+                f"| Median along-track | {median_along} km |",
+                f"| Median radial | {median_radial} km |",
+                f"| Median cross-track | {median_cross} km |",
+                "",
+                "The later element is not perfect ground truth; this is the",
+                "disagreement between successive public estimates. The",
+                "along-track component dominating the radial one is the",
+                "expected signature of drag-model error accumulating along",
+                "the velocity direction.",
+                "",
+            ]
+            worst = fetch_rows(
+                connection,
+                """
+                SELECT object_name, source_group,
+                       ROUND(propagation_span_hours, 1),
+                       ROUND(total_km, 2),
+                       ROUND(along_track_km, 2)
+                FROM gold_propagation_disagreement
+                ORDER BY total_km DESC
+                LIMIT 10
+                """,
+            )
+            if worst:
+                lines += [
+                    "### Largest Disagreements",
+                    "",
+                    "| Object | Group | Span (h) | Total (km) | Along-track (km) |",
+                    "|---|---|---:|---:|---:|",
+                ]
+                for name, group, span, total, along in worst:
+                    lines.append(f"| {name} | {group} | {span} | {total} | {along} |")
+                lines.append("")
+
     if freshness_groups:
         lines += [
             "## Element Freshness (latest snapshot of each group)",
@@ -573,7 +702,11 @@ def write_report(
 def change_refresh_count(connection: duckdb.DuckDBPyConnection) -> int:
     return int(
         connection.sql(
-            "SELECT COUNT(*) FROM gold_orbit_change WHERE NOT same_element_set"
+            """
+            SELECT COUNT(DISTINCT norad_catalog_id)
+            FROM gold_orbit_change
+            WHERE NOT same_element_set
+            """
         ).fetchone()[0]
     )
 
@@ -628,6 +761,7 @@ def main() -> int:
             ("orbit decay rates", chart_orbit_change(connection)),
             ("element freshness", chart_element_freshness(connection)),
             ("orbit reliability index", chart_orbit_reliability(connection)),
+            ("propagation disagreement", chart_propagation_disagreement(connection)),
         ]:
             if chart is not None:
                 chart_paths.append(chart)
@@ -664,6 +798,16 @@ def main() -> int:
             ORDER BY object_count DESC
             """,
         )
+        disagreement_summary = None
+        if table_exists(connection, "gold_propagation_disagreement"):
+            disagreement_summary = fetch_rows(
+                connection,
+                """
+                SELECT COUNT(*), ROUND(MEDIAN(total_km), 3), ROUND(MAX(total_km), 3),
+                       ROUND(MEDIAN(propagation_span_hours), 2)
+                FROM gold_propagation_disagreement
+                """,
+            )[0]
     except (duckdb.Error, OSError, ValueError) as error:
         print(f"Research analysis error: {error}", file=sys.stderr)
         return 1
@@ -697,6 +841,13 @@ def main() -> int:
                 f"  {group} group: {count:,} objects, median ORI {median}, "
                 f"{low:,} low, {reduced:,} reduced"
             )
+        print()
+    if disagreement_summary and disagreement_summary[0]:
+        pair_count, median_total, max_total, median_span = disagreement_summary
+        print("SGP4 propagation disagreement (real measurements):")
+        print(f"  Measured pairs: {pair_count:,}")
+        print(f"  Median total: {median_total} km, max: {max_total} km")
+        print(f"  Median propagation span: {median_span} h")
         print()
     if snapshot_count < 2:
         print("Orbit-change detection is ready but needs at least 2 snapshots.")

@@ -187,9 +187,21 @@ def main() -> int:
 
         measurements: list[tuple] = []
         skipped = 0
+        retrograde_pairs = 0
         for norad, entries in history.items():
             for earlier, later in zip(entries, entries[1:]):
                 if earlier["element_epoch_utc"] == later["element_epoch_utc"]:
+                    continue
+                span_hours = (
+                    later["element_epoch_utc"] - earlier["element_epoch_utc"]
+                ).total_seconds() / 3600.0
+                if span_hours <= 0:
+                    # The catalog republished an element whose epoch is older
+                    # than the previously seen element (a retrograde update).
+                    # There is no forward prediction to evaluate, so the pair
+                    # is not a measurement; it is counted and reported as a
+                    # catalog quirk instead of silently dropped.
+                    retrograde_pairs += 1
                     continue
                 earlier_satellite = build_satellite(earlier)
                 later_satellite = build_satellite(later)
@@ -213,9 +225,6 @@ def main() -> int:
                     position_reference, velocity_reference, difference
                 )
                 total = math.sqrt(sum(d * d for d in difference))
-                span_hours = (
-                    later["element_epoch_utc"] - earlier["element_epoch_utc"]
-                ).total_seconds() / 3600.0
 
                 measurements.append(
                     (
@@ -279,13 +288,20 @@ def main() -> int:
     print(f"Objects with element history: {tracked_objects:,}")
     print(f"Objects awaiting a refreshed element set: {awaiting:,}")
     print(f"Measurable element-set pairs: {len(measurements)}")
+    if retrograde_pairs:
+        print(
+            f"Retrograde epoch pairs (republished with older epoch, not "
+            f"measurable): {retrograde_pairs}"
+        )
     if skipped:
         print(f"Pairs skipped (unusable elements or SGP4 errors): {skipped}")
     if measurements:
         totals = sorted(m[9] for m in measurements)
         median = totals[len(totals) // 2]
         spans = [m[5] for m in measurements]
+        along = sorted(m[7] for m in measurements)
         print(f"Disagreement total km: min {totals[0]:.3f}, median {median:.3f}, max {totals[-1]:.3f}")
+        print(f"Along-track km: median {along[len(along) // 2]:.3f}, max {along[-1]:.3f}")
         print(f"Propagation spans: {min(spans):.2f} h to {max(spans):.2f} h")
         print("Gold table and CSV updated with measurements.")
     else:

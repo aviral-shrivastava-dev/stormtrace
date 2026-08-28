@@ -74,7 +74,16 @@ def run_step(
     name: str,
     script: str,
     extra_args: list[str] | None = None,
+    timeout: int = 300,
 ) -> bool:
+    """Run one pipeline script as a subprocess.
+
+    The default timeout is generous because a machine that just woke from
+    sleep runs everything slower: cold caches, antivirus scanning, and a
+    growing backlog of Bronze files to checksum. A step killed by timeout
+    leaves no partial data: the history loader commits each file
+    atomically, and every other step rebuilds its outputs from scratch.
+    """
     command = [sys.executable, str(ROOT / "src" / script), *(extra_args or [])]
     started_at = datetime.now(UTC)
     started = time.monotonic()
@@ -84,7 +93,7 @@ def run_step(
         cwd=ROOT,
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=timeout,
         check=False,
     )
     duration = round(time.monotonic() - started, 3)
@@ -160,6 +169,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
             "ingest_celestrak",
             "ingest_celestrak.py",
             ["--groups", ",".join(due_groups)],
+            timeout=300,
         ):
             print("Pipeline stopped because ingestion failed.", file=sys.stderr)
             return 1
@@ -171,7 +181,12 @@ def run_pipeline(args: argparse.Namespace) -> int:
         )
 
     if noaa_due:
-        if not run_step(run_id, "ingest_noaa", "ingest_noaa.py"):
+        if not run_step(
+            run_id,
+            "ingest_noaa",
+            "ingest_noaa.py",
+            timeout=300,
+        ):
             print("Pipeline stopped because ingestion failed.", file=sys.stderr)
             return 1
     else:
@@ -183,8 +198,8 @@ def run_pipeline(args: argparse.Namespace) -> int:
         ("summarize_history", "summarize_history.py"),
         ("build_gold", "build_gold.py"),
         ("build_orbit_features", "build_orbit_features.py"),
-        ("analyze_research", "analyze_research.py"),
         ("build_propagation_disagreement", "build_propagation_disagreement.py"),
+        ("analyze_research", "analyze_research.py"),
     ]:
         if not run_step(run_id, name, script):
             print(f"Pipeline stopped because {name} failed.", file=sys.stderr)
