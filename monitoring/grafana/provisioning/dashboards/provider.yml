@@ -1,0 +1,14 @@
+# Grafana dashboard provisioning: load StormTrace dashboards from disk.
+apiVersion: 1
+
+providers:
+  - name: StormTrace
+    orgId: 1
+    folder: StormTrace
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

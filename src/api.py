@@ -28,7 +28,8 @@ from typing import Any, Iterator
 
 import duckdb
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CollectorRegistry, Gauge, generate_latest
 
 ROOT = Path(__file__).resolve().parents[1]
 DATABASE = ROOT / "data" / "stormtrace.duckdb"
@@ -113,6 +114,165 @@ def root() -> dict[str, Any]:
             "Not a replacement for official conjunction warnings."
         ),
     }
+
+
+@app.get("/metrics")
+def metrics() -> Response:
+    """Expose research and pipeline state in Prometheus text format.
+
+    Prometheus semantics differ from REST: a scrape should return 200 even
+    when the database is busy, with database_reachable 0 carrying the
+    signal -- an absent metric is itself an alertable condition. Values
+    are computed fresh per scrape from the Gold layer.
+    """
+    registry = CollectorRegistry()
+    database_reachable = Gauge(
+        "stormtrace_database_reachable",
+        "1 when the DuckDB database could be opened read-only",
+        registry=registry,
+    )
+
+    # One Gauge object per (name, label-shape): constructing the same
+    # metric twice in a registry raises DuplicateTimeseries, and a gauge
+    # built with an empty label list rejects .labels(). The cache handles
+    # both, so loops can emit many labeled samples of one metric.
+    gauge_objects: dict[tuple[str, tuple[str, ...]], object] = {}
+
+    def gauge(name: str, documentation: str, value: float, **labels: str) -> None:
+        key = (name, tuple(sorted(labels)))
+        if key not in gauge_objects:
+            gauge_objects[key] = Gauge(
+                name, documentation, list(labels), registry=registry
+            )
+        collector = gauge_objects[key]
+        if labels:
+            collector.labels(**labels).set(value)
+        else:
+            collector.set(value)
+
+    try:
+        with database() as connection:
+            database_reachable.set(1)
+
+            counts = {
+                table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in [
+                    "orbital_snapshot_history",
+                    "noaa_magnetic_history",
+                    "noaa_plasma_history",
+                ]
+            }
+            gauge(
+                "stormtrace_objects_tracked",
+                "Distinct NORAD objects ever tracked",
+                connection.execute(
+                    "SELECT COUNT(DISTINCT norad_catalog_id) FROM orbital_snapshot_history"
+                ).fetchone()[0],
+            )
+            gauge(
+                "stormtrace_orbital_snapshots",
+                "Distinct orbital snapshot timestamps in history",
+                connection.execute(
+                    "SELECT COUNT(DISTINCT snapshot_at_utc) FROM orbital_snapshot_history"
+                ).fetchone()[0],
+            )
+            gauge("stormtrace_magnetic_history_rows", "Rows in magnetic history", counts["noaa_magnetic_history"])
+            gauge("stormtrace_plasma_history_rows", "Rows in plasma history", counts["noaa_plasma_history"])
+
+            if table_exists(connection, "gold_propagation_disagreement"):
+                row = connection.execute(
+                    """
+                    SELECT COUNT(*), ROUND(MEDIAN(total_km), 3), ROUND(MAX(total_km), 3),
+                           ROUND(MEDIAN(propagation_span_hours), 2)
+                    FROM gold_propagation_disagreement
+                    """
+                ).fetchone()
+                gauge("stormtrace_disagreement_pairs", "Measured propagation-disagreement pairs", row[0])
+                gauge("stormtrace_disagreement_median_km", "Median disagreement total (km)", row[1])
+                gauge("stormtrace_disagreement_max_km", "Maximum disagreement total (km)", row[2])
+                gauge("stormtrace_disagreement_median_span_hours", "Median propagation span (h)", row[3])
+
+            if table_exists(connection, "gold_ori_validation_stats"):
+                for metric, value in connection.execute(
+                    "SELECT metric, value FROM gold_ori_validation_stats"
+                ).fetchall():
+                    gauge(
+                        "stormtrace_validation_metric",
+                        "ORI validation statistics (metric label identifies which)",
+                        value or 0.0,
+                        metric=metric,
+                    )
+
+            if table_exists(connection, "gold_orbit_reliability_index"):
+                for reliability_class, count in connection.execute(
+                    "SELECT reliability_class, object_count FROM gold_reliability_class_summary"
+                ).fetchall():
+                    gauge(
+                        "stormtrace_ori_class_objects",
+                        "Objects currently in each ORI reliability class",
+                        count,
+                        reliability_class=reliability_class,
+                    )
+                environment = connection.execute(
+                    "SELECT environment_factor FROM gold_orbit_reliability_index LIMIT 1"
+                ).fetchone()
+                if environment:
+                    gauge(
+                        "stormtrace_environment_factor",
+                        "Space-weather environment factor (1.0 quiet, 0.8 southward Bz)",
+                        environment[0],
+                    )
+
+            if table_exists(connection, "gold_freshness_by_group"):
+                for group, count, median, stale in connection.execute(
+                    "SELECT source_group, object_count, median_age_hours, stale_percent FROM gold_freshness_by_group"
+                ).fetchall():
+                    gauge(
+                        "stormtrace_group_objects",
+                        "Objects in latest snapshot of each group",
+                        count,
+                        source_group=group,
+                    )
+                    gauge(
+                        "stormtrace_freshness_median_age_hours",
+                        "Median element age per group (h)",
+                        median or 0.0,
+                        source_group=group,
+                    )
+                    gauge(
+                        "stormtrace_freshness_stale_percent",
+                        "Percent of objects with elements older than 24 h",
+                        stale or 0.0,
+                        source_group=group,
+                    )
+
+            if table_exists(connection, "gold_space_weather_hourly"):
+                row = connection.execute(
+                    """
+                    SELECT ROUND(MIN(minimum_bz_gsm), 2), ROUND(MAX(average_proton_speed), 2),
+                           COUNT(*) FILTER (WHERE disturbance_level = 'southward_bz'),
+                           COUNT(*) FILTER (WHERE disturbance_level = 'fast_wind')
+                    FROM gold_space_weather_hourly
+                    """
+                ).fetchone()
+                gauge("stormtrace_spaceweather_min_bz_nt", "Minimum Bz observed (nT)", row[0] or 0.0)
+                gauge("stormtrace_spaceweather_max_proton_speed", "Max hourly avg proton speed (km/s)", row[1] or 0.0)
+                gauge("stormtrace_spaceweather_southward_bz_hours", "Hours with southward Bz (last 24 h)", row[2])
+                gauge("stormtrace_spaceweather_fast_wind_hours", "Hours with fast wind (last 24 h)", row[3])
+    except DatabaseBusy:
+        database_reachable.set(0)
+    except duckdb.Error:
+        database_reachable.set(0)
+
+    if QUALITY_REPORT.exists():
+        report = json.loads(QUALITY_REPORT.read_text(encoding="utf-8"))
+        failures = sum(1 for check in report if check["status"] == "fail")
+        warnings = sum(1 for check in report if check["status"] == "warn")
+        gauge("stormtrace_quality_checks_total", "Data-quality checks in the latest report", len(report))
+        gauge("stormtrace_quality_failures", "Failing checks (blocking)", failures)
+        gauge("stormtrace_quality_warnings", "Warning checks (non-blocking)", warnings)
+
+    return Response(content=generate_latest(registry), media_type="text/plain")
 
 
 @app.get("/health")

@@ -49,7 +49,8 @@ Orchestration: `run_pipeline.py` (lock-protected, policy-aware) or the
 registered Windows scheduled task `StormTracePipeline` (hourly, with
 two-hour per-source rate limiting). Each run ends by syncing all zones
 into the MinIO lakehouse and publishing its events to the Redpanda stream
-when those services are running (`docker compose up -d`).
+when those services are running (`docker compose up -d`). The status API
+exposes `/metrics` for the Prometheus + Grafana monitoring stack.
 
 ## Quick Start
 
@@ -69,17 +70,18 @@ Outputs land in `data\gold\` (CSV tables) and `data\reports\` (charts and
 - **Source update frequency ≠ data change frequency**: consecutive snapshots
   can contain byte-identical element sets; measured "zero drag" was correctly
   reported as republished data, not as a physical measurement.
-- **Real propagation disagreement measured**: across 132 refreshed element
-  pairs (median span 16.3 h), the median SGP4 disagreement is 0.56 km, and
+- **Real propagation disagreement measured**: across 290 refreshed element
+  pairs (median span 9.6 h), the median SGP4 disagreement is 0.29 km, and
   the RIC decomposition separates drag (along-track dominant, e.g. SWIFT)
-  from maneuvers (radial-dominant, e.g. the MMS formation).
-- **The Orbit Reliability Index is directionally validated**: across 209
+  from maneuvers (radial-dominant, e.g. the MMS formation) and from
+  long-span SGP4 model error on elliptical orbits (CXO, 281 km over 63 h).
+- **The Orbit Reliability Index is directionally validated**: across 290
   refreshed element pairs, median measured error rises monotonically across
-  the moderate → reduced → low predicted classes (0.2 → 0.5 → 2.2 km);
-  Spearman score-vs-error is −0.43 (−0.50 on the drag-like subset), and
-  element age correlates with error in the designed positive direction.
-  The "high" class is contaminated by maneuvering spacecraft — an
-  unmodeled failure mode documented in the report.
+  the moderate → reduced → low predicted classes, and Spearman
+  score-vs-error strengthens as pairs accumulate (−0.36 → −0.43 → −0.49),
+  with element age now correlating with error at +0.41 in the designed
+  direction. The "high" class is contaminated by maneuvering spacecraft —
+  an unmodeled failure mode documented in the report.
 - **A learned model beats the hand-crafted index and finds a missing
   term**: a gradient-boosted model trained on point-in-time features
   predicts disagreement rate with pooled Spearman 0.565 (out-of-fold,
@@ -104,8 +106,9 @@ Outputs land in `data\gold\` (CSV tables) and `data\reports\` (charts and
 src\    ingestion, loading, quality gate, orchestration, analysis, API
 sql\    SQL transformations for Gold tables (lessons 3, 4, 8, 11, 12)
 scripts\ Windows scheduled-task setup and removal
+monitoring\ Prometheus scrape config and Grafana provisioning
 .github\workflows\ continuous-integration smoke test
-docker-compose.yml  MinIO lakehouse (S3-compatible object storage)
+docker-compose.yml  MinIO + Redpanda + Prometheus + Grafana
 data\   bronze/ silver/ gold/ reports/ quality/ logs/  (not committed)
 ```
 
@@ -222,7 +225,7 @@ Phases 1-7 below are complete; later phases build on them.
 | 19 | MinIO lakehouse | Object storage, S3 API, SQL-over-S3 | Docker, MinIO, httpfs | Done |
 | 20 | Streaming events | Kafka API, topics, keys, consumer groups | Redpanda, confluent-kafka | Done |
 | 21 | Learning the index | GroupKFold, leakage control, MLflow tracking | scikit-learn, MLflow | Done |
-| 22 | Dashboards and monitoring | Operational visibility | Grafana, Prometheus | Planned |
+| 22 | Dashboards and monitoring | Prometheus semantics, dashboards as code | Grafana, Prometheus | Done |
 
 ## Rules For Scientific Honesty
 
@@ -1579,3 +1582,91 @@ in MLflow.
    both the model's importance and the MMS/CXO outlier signatures.
 5. Re-run training after a few more snapshot cycles and compare the two
    runs side by side in the MLflow UI.
+
+## Lesson 22: Dashboards With Prometheus And Grafana
+
+The final roadmap layer: operational visibility. Research numbers locked in
+CSVs and reports serve one person at one moment; a dashboard makes the
+system observable continuously. This is the classic monitoring stack —
+Prometheus scrapes, Grafana visualizes — fed by a new `/metrics` endpoint
+on the status API.
+
+### Running The Stack
+
+```powershell
+docker compose up -d                      # MinIO + Redpanda + Prometheus + Grafana
+python -m uvicorn src.api:app --port 8000  # the scrape target
+```
+
+Then open **http://127.0.0.1:3000** — the "StormTrace Research Status"
+dashboard appears without any clicks: datasource and dashboard are
+provisioned from `monitoring\grafana` (dashboards as code). Anonymous
+read-only access is enabled for the demo; the admin password is `admin`.
+
+Prometheus is at http://127.0.0.1:9090 (check Targets to see the API
+being scraped every 30 seconds).
+
+### The /metrics Endpoint
+
+The API exposes ~37 Prometheus gauges computed fresh per scrape from the
+Gold layer: quality-gate failures, tracked objects, disagreement
+statistics, ORI class counts, the environment factor, per-group
+freshness, and space-weather conditions.
+
+Two Prometheus semantics shaped the design:
+
+1. **A scrape returns 200 even when the database is busy.** REST instincts
+   say 503; monitoring instincts say the metric `stormtrace_database_reachable
+   0` carries the signal — because an *absent* metric is itself an
+   alertable condition, the scrape must succeed for anything to be
+   observable at all.
+2. **Gauges are point-in-time snapshots.** Prometheus stores the history;
+   the endpoint never needs to answer "over what window?".
+
+Two bugs were found and fixed while building it, both instructive:
+`Gauge` constructed with an empty label-names list rejects `.labels()`,
+and constructing the same metric name twice in one registry raises
+`DuplicateTimeseries` — so labeled gauges are built once per
+(name, label-shape) and cached.
+
+### The Dashboard
+
+Eleven panels:
+
+- **Stats**: Database, Quality Failures, Environment Factor, Objects
+  Tracked, Measured Pairs, Median/Max Disagreement, ORI Validation
+  Spearman, Space Weather
+- **Time series**: Reliability Class Distribution (stacked) and Median
+  Element Age by Group
+
+The design intent: during a geomagnetic storm, the Environment Factor
+stat drops, space-weather hours climb, and the low/reduced reliability
+classes swell — the system-wide stress signal, visible at a glance. That
+is the exact event the project is still waiting to capture.
+
+### Lesson 22 Exercise
+
+1. Bring the stack up, open the dashboard, and confirm every panel has
+   data.
+2. Stop the API and watch `stormtrace_database_reachable` disappear from
+   Prometheus (up != 1 in the query browser).
+3. Run the pipeline while the API is up and watch a scrape land during
+   the write lock (database_reachable dips to 0).
+4. Add one panel of your own: for example, a time series of
+   `stormtrace_disagreement_median_km`.
+5. Explain why the metrics endpoint must not raise 503 when the database
+   is busy.
+
+## The Roadmap Complete
+
+With Lesson 22, the planned roadmap is finished. StormTrace now spans the
+full modern data-platform arc on a student laptop: automated ingestion
+with provider-respecting rate limits, an immutable Bronze lakehouse with
+checksummed lineage, a quality gate that blocks bad data, SGP4 science
+instruments, a validated reliability index, a learned model that found
+what the index missed, an API, an event stream, object storage with
+SQL-over-S3, and monitoring — each layer added only when it solved a
+problem the previous layer exposed.
+
+What remains is growth: more snapshots, and above all the storm-time
+data that the environment factor has never seen.

@@ -1,13 +1,16 @@
-# StormTrace local lakehouse and event streaming.
+# StormTrace local lakehouse, event streaming, and monitoring.
 #
 #   docker compose up -d
 #
 # MinIO server:    http://127.0.0.1:9000
 # MinIO console:   http://127.0.0.1:9001  (login minioadmin / minioadmin)
 # Redpanda broker: localhost:9092  (Kafka API compatible)
+# Prometheus:      http://127.0.0.1:9090
+# Grafana:         http://127.0.0.1:3000  (anonymous read-only access)
 #
-# The minio-init service creates the single 'stormtrace' bucket; zones
-# (bronze/, silver/, gold/, reports/, quality/) are prefixes inside it.
+# Prometheus scrapes the StormTrace API on the HOST; start it with:
+#   python -m uvicorn src.api:app --port 8000
+#
 # Credentials are local-development defaults: never use them for anything
 # reachable from the internet.
 
@@ -72,6 +75,44 @@ services:
       timeout: 10s
       retries: 12
 
+  # Scrapes the StormTrace API's /metrics endpoint on the host every 30s.
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: stormtrace-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      # Docker Desktop resolves host.docker.internal already; the explicit
+      # mapping keeps the setup working on other Docker engines too.
+      - "host.docker.internal:host-gateway"
+
+  # Dashboards as code: datasource and dashboard are provisioned from
+  # ./monitoring/grafana, so the research board appears without clicks.
+  grafana:
+    image: grafana/grafana:latest
+    container_name: stormtrace-grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/stormtrace.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
 volumes:
   minio-data:
   redpanda-data:
+  prometheus-data:
+  grafana-data:
