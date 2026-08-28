@@ -256,8 +256,8 @@ def main() -> int:
                 along_track_km DOUBLE,
                 cross_track_km DOUBLE,
                 total_km DOUBLE,
-                earlier_snapshot_at_utc TIMESTAMPTZ,
-                later_snapshot_at_utc TIMESTAMPTZ
+                earlier_snapshot_at_utc TIMESTAMP,
+                later_snapshot_at_utc TIMESTAMP
             )
             """
         )

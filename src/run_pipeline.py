@@ -199,6 +199,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
         ("build_gold", "build_gold.py"),
         ("build_orbit_features", "build_orbit_features.py"),
         ("build_propagation_disagreement", "build_propagation_disagreement.py"),
+        ("validate_ori", "validate_ori.py"),
         ("analyze_research", "analyze_research.py"),
     ]:
         if not run_step(run_id, name, script):

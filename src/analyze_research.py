@@ -323,6 +323,51 @@ def chart_propagation_disagreement(connection: duckdb.DuckDBPyConnection) -> Pat
     return path
 
 
+def chart_ori_validation(connection: duckdb.DuckDBPyConnection) -> Path | None:
+    if not table_exists(connection, "gold_ori_validation_pairs"):
+        return None
+    rows = fetch_rows(
+        connection,
+        """
+        SELECT base_score, total_km, reliability_class
+        FROM gold_ori_validation_pairs
+        """,
+    )
+    if not rows:
+        return None
+
+    figure, axis = plt.subplots(figsize=(12, 6))
+    class_colors = {
+        "high": "tab:green",
+        "moderate": "tab:blue",
+        "reduced": "tab:orange",
+        "low": "tab:red",
+    }
+    for reliability_class, color in class_colors.items():
+        class_rows = [row for row in rows if row[2] == reliability_class]
+        if not class_rows:
+            continue
+        axis.scatter(
+            [float(row[0]) for row in class_rows],
+            [float(row[1]) for row in class_rows],
+            alpha=0.6,
+            s=30,
+            color=color,
+            label=f"{reliability_class} (n={len(class_rows):,})",
+        )
+    axis.set_xlabel("Predicted base score at earlier element (higher = more reliable)")
+    axis.set_ylabel("Measured disagreement (km)")
+    axis.set_title("ORI Validation: Predicted Reliability vs Measured Disagreement")
+    axis.set_yscale("log")
+    axis.legend()
+    axis.grid(alpha=0.3, which="both")
+    figure.tight_layout()
+    path = REPORTS_DIR / "ori_validation.png"
+    figure.savefig(path, dpi=120)
+    plt.close(figure)
+    return path
+
+
 def space_weather_summary(connection: duckdb.DuckDBPyConnection) -> dict[str, object]:
     relation = connection.sql(
         """
@@ -549,6 +594,95 @@ def write_report(
                     lines.append(f"| {name} | {group} | {span} | {total} | {along} |")
                 lines.append("")
 
+    if table_exists(connection, "gold_ori_validation_bins"):
+        validation_bins = fetch_rows(
+            connection,
+            """
+            SELECT reliability_class, pair_count, median_total_km,
+                   median_km_per_hour, p90_total_km
+            FROM gold_ori_validation_bins
+            ORDER BY pair_count
+            """,
+        )
+        validation_stats = dict(
+            fetch_rows(
+                connection,
+                "SELECT metric, value FROM gold_ori_validation_stats",
+            )
+        )
+        if validation_bins:
+            lines += [
+                "## Orbit Reliability Index Validation",
+                "",
+                "Each measured disagreement pair is scored with the ORI",
+                "components exactly as they stood at the earlier element's",
+                "snapshot time (point-in-time correct prediction). Medians",
+                "are used because maneuvers produce outliers the index is",
+                "not designed to predict.",
+                "",
+                "| Predicted class | Pairs | Median total (km) | Median rate (km/h) | P90 total (km) |",
+                "|---|---:|---:|---:|---:|",
+            ]
+            for reliability_class, count, median_total, median_rate, p90 in validation_bins:
+                rate = median_rate if median_rate is not None else "n/a"
+                lines.append(
+                    f"| {reliability_class} | {count:,} | {median_total} | {rate} | {p90} |"
+                )
+            lines += [""]
+
+            score_correlation = validation_stats.get("spearman_score_vs_total_km")
+            age_correlation = validation_stats.get("spearman_age_vs_total_km")
+            drag_correlation = validation_stats.get(
+                "spearman_score_vs_total_km_drag_like"
+            )
+            drag_pairs = validation_stats.get("drag_like_pairs")
+            if score_correlation is not None:
+                lines += [
+                    "### Correlation Evidence",
+                    "",
+                    f"- Spearman, predicted score vs measured total km: "
+                    f"{score_correlation} (negative is correct)",
+                    f"- Spearman, element age at prediction vs measured km: "
+                    f"{age_correlation} (positive is correct)",
+                ]
+                if drag_correlation is not None:
+                    lines.append(
+                        f"- Spearman, score vs total km, drag-like subset "
+                        f"({int(drag_pairs)} along-track-dominant pairs): "
+                        f"{drag_correlation}"
+                    )
+                altitude_corr = validation_stats.get(
+                    "spearman_altitude_vs_total_km_drag_like"
+                )
+                if altitude_corr is not None:
+                    lines.append(
+                        f"- Spearman, altitude vs total km, drag-like subset: "
+                        f"{altitude_corr} (altitude alone is currently the "
+                        f"strongest single predictor)"
+                    )
+                lines += [
+                    "",
+                    "### What The Validation Shows",
+                    "",
+                    "- The index ranks reliability in the predicted",
+                    "  direction: median error rises monotonically across",
+                    "  the moderate, reduced, and low classes.",
+                    "- Drag sensitivity (altitude) predicts error more",
+                    "  strongly than the composite score, suggesting the",
+                    "  freshness weight deserves recalibration with more",
+                    "  data.",
+                    "- The high class is contaminated by maneuvering",
+                    "  spacecraft: high-altitude orbits score high on drag",
+                    "  safety, but maneuvers are an unmodeled failure mode",
+                    "  that no public-data index can predict.",
+                    "- Element age alone shows only a weak signal here,",
+                    "  because fresh elements on low-altitude objects still",
+                    "  drift faster than stale elements on high objects.",
+                    "- The environment factor remains unvalidated until a",
+                    "  disturbed space-weather period is captured.",
+                    "",
+                ]
+
     if freshness_groups:
         lines += [
             "## Element Freshness (latest snapshot of each group)",
@@ -762,6 +896,7 @@ def main() -> int:
             ("element freshness", chart_element_freshness(connection)),
             ("orbit reliability index", chart_orbit_reliability(connection)),
             ("propagation disagreement", chart_propagation_disagreement(connection)),
+            ("ORI validation", chart_ori_validation(connection)),
         ]:
             if chart is not None:
                 chart_paths.append(chart)
@@ -808,6 +943,14 @@ def main() -> int:
                 FROM gold_propagation_disagreement
                 """,
             )[0]
+        validation_stats_console = None
+        if table_exists(connection, "gold_ori_validation_stats"):
+            validation_stats_console = dict(
+                fetch_rows(
+                    connection,
+                    "SELECT metric, value FROM gold_ori_validation_stats",
+                )
+            )
     except (duckdb.Error, OSError, ValueError) as error:
         print(f"Research analysis error: {error}", file=sys.stderr)
         return 1
@@ -848,6 +991,16 @@ def main() -> int:
         print(f"  Measured pairs: {pair_count:,}")
         print(f"  Median total: {median_total} km, max: {max_total} km")
         print(f"  Median propagation span: {median_span} h")
+        print()
+    if validation_stats_console:
+        print("ORI validation against measured disagreement:")
+        print(f"  Validated pairs: {int(validation_stats_console.get('pairs', 0)):,}")
+        score_corr = validation_stats_console.get("spearman_score_vs_total_km")
+        age_corr = validation_stats_console.get("spearman_age_vs_total_km")
+        if score_corr is not None:
+            print(f"  Spearman score vs error: {score_corr} (negative is correct)")
+        if age_corr is not None:
+            print(f"  Spearman element age vs error: {age_corr} (positive is correct)")
         print()
     if snapshot_count < 2:
         print("Orbit-change detection is ready but needs at least 2 snapshots.")

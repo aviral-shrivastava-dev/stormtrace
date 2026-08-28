@@ -40,6 +40,8 @@ summarize_history  build_gold    build_orbit_features
                       |
         build_propagation_disagreement.py  (SGP4 drift between element sets)
                       |
+              validate_ori.py         (point-in-time ORI backtest, Spearman)
+                      |
         data\gold\*.csv  +  data\reports\*.png / research_summary.md
 ```
 
@@ -69,6 +71,12 @@ Outputs land in `data\gold\` (CSV tables) and `data\reports\` (charts and
   pairs (median span 16.3 h), the median SGP4 disagreement is 0.56 km, and
   the RIC decomposition separates drag (along-track dominant, e.g. SWIFT)
   from maneuvers (radial-dominant, e.g. the MMS formation).
+- **The Orbit Reliability Index is directionally validated**: median
+  measured error rises monotonically across the moderate → reduced → low
+  predicted classes (0.2 → 0.6 → 2.3 km); Spearman score-vs-error is −0.36
+  (−0.47 on the drag-like subset). Altitude is currently the strongest
+  single predictor, and the "high" class is contaminated by maneuvering
+  spacecraft — an unmodeled failure mode documented in the report.
 - **Element freshness varies by object class**: median public element age
   is 9-18 hours depending on group; science satellites are tracked best,
   and roughly a quarter of cubesats carry elements older than 24 hours.
@@ -198,7 +206,7 @@ Phases 1-7 below are complete; later phases build on them.
 | 14 | Science group and continuous integration | Population growth, CI discipline | GitHub Actions | Done |
 | 15 | SGP4 propagation disagreement | Orbit propagation, RIC frames, migration | sgp4 | Done |
 | 16 | First real measurements, partial-load incident | Transactions, atomicity, incident response | DuckDB | Done |
-| 17 | Validate ORI against measurements | Backtesting, calibration | Python | Planned |
+| 17 | Validate ORI against measurements | Point-in-time backtesting, Spearman correlation | Python | Done |
 | 18 | Move data into a local lakehouse | Object storage, table formats | Docker, MinIO, Iceberg | Planned |
 | 19 | Process larger history | Distributed processing | Spark | Planned |
 | 20 | Add real-time events | Streaming and event time | Kafka/Redpanda | Planned |
@@ -1174,3 +1182,91 @@ doing exactly what a research instrument should.
 4. Explain why SWIFT's disagreement shape differs from MMS's.
 5. Explain why "delete rows where source_file is not in the registry" is a
    safer repair than "delete rows where source_file equals X".
+
+## Lesson 17: Validating The Orbit Reliability Index
+
+The index *predicted* that stale, low-altitude public orbits are the least
+trustworthy. Lesson 15's instrument finally produced the outcome data, so
+the predictions could be tested. Validation answers one question: **when the
+index said an orbit was unreliable, was it actually unreliable?**
+
+### Method: Point-In-Time Correctness
+
+For each measured disagreement pair, the ORI components are reconstructed
+exactly as they stood at the **earlier element's snapshot time**:
+
+```text
+age at prediction     = earlier_snapshot_at - earlier_element_epoch
+altitude at prediction = derived from the earlier element's mean motion
+score                  = 0.55 * freshness + 0.45 * drag_safety
+```
+
+Scoring with current data would leak the future into the prediction; this
+construction cannot. Spearman rank correlation is computed with a
+pure-stdlib implementation (average ranks for ties, Pearson on ranks).
+
+Run:
+
+```powershell
+python src\validate_ori.py
+```
+
+### Results (132 pairs, quiet space weather)
+
+| Predicted class | Pairs | Median total (km) | Median rate (km/h) |
+|---|---:|---:|---:|
+| moderate | 39 | 0.197 | 0.017 |
+| reduced | 72 | 0.572 | 0.041 |
+| low | 13 | 2.276 | 0.103 |
+| high | 8 | 75.894 | 4.740 |
+
+Correlation evidence:
+
+```text
+Spearman score vs total km:              -0.364  (predicted direction)
+Spearman score vs total km, drag-like:   -0.472
+Spearman altitude vs total km, drag-like: -0.568  (strongest predictor)
+Spearman element age vs total km:         -0.128  (weak, confounded)
+```
+
+### What The Validation Actually Showed
+
+1. **The direction is validated.** Median error rises monotonically across
+   moderate → reduced → low (0.2 → 0.6 → 2.3 km), exactly as predicted.
+2. **Altitude is the strongest single predictor** (−0.57), stronger than
+   the composite score itself. The 0.55 freshness weight deserves
+   recalibration as more pairs accumulate.
+3. **Element age alone is weakly informative** (−0.13, wrong direction but
+   tiny). Reason: fresh elements on low-altitude objects drift faster than
+   stale elements on high-altitude ones. Altitude dominates in this
+   population; freshness matters within altitude bands.
+4. **The high class is contaminated by maneuvers.** The MMS formation
+   spacecraft fly high-altitude elliptical orbits (drag-safe → "high")
+   but maneuver constantly, producing ~150 km disagreements. Maneuvers are
+   an unmodeled failure mode: no public-data index can predict them
+   without explicit maneuver detection.
+5. **The environment factor remains unvalidated** — all data so far is
+   quiet weather, so the factor is constant and cannot discriminate. The
+   storm-time test must wait for a disturbed period.
+
+### The Timezone Bug Found By The Validation
+
+The first validation run matched zero pairs. The disagreement table's
+snapshot columns were declared `TIMESTAMPTZ` but were inserted with naive
+UTC datetimes, which DuckDB silently reinterpreted in the machine's local
+timezone (+05:30), breaking the join. A join test with an explicit +5:30
+shift matched exactly 132 rows — the diagnosis. The fix stores those
+columns as plain `TIMESTAMP` (naive UTC), matching how they are inserted.
+Lesson: **a silent timezone reinterpretation is invisible until two tables
+must agree.**
+
+### Lesson 17 Exercise
+
+1. Run `python src\validate_ori.py` and read the class table.
+2. Open `data\reports\ori_validation.png` and find the MMS points.
+3. Explain why scoring with current data instead of point-in-time data
+   would invalidate the test.
+4. Argue for or against lowering the freshness weight below 0.55, using
+   the correlations as evidence.
+5. Propose how a maneuver-detection feature could protect the high class
+   from contamination.
