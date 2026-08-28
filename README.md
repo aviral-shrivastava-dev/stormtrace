@@ -48,7 +48,8 @@ summarize_history  build_gold    build_orbit_features
 Orchestration: `run_pipeline.py` (lock-protected, policy-aware) or the
 registered Windows scheduled task `StormTracePipeline` (hourly, with
 two-hour per-source rate limiting). Each run ends by syncing all zones
-into the MinIO lakehouse when it is running (`docker compose up -d`).
+into the MinIO lakehouse and publishing its events to the Redpanda stream
+when those services are running (`docker compose up -d`).
 
 ## Quick Start
 
@@ -212,7 +213,7 @@ Phases 1-7 below are complete; later phases build on them.
 | 17 | Validate ORI against measurements | Point-in-time backtesting, Spearman correlation | Python | Done |
 | 18 | Status API | Serving research outputs, graceful degradation | FastAPI | Done |
 | 19 | MinIO lakehouse | Object storage, S3 API, SQL-over-S3 | Docker, MinIO, httpfs | Done |
-| 20 | Add real-time events | Streaming and event time | Kafka/Redpanda | Planned |
+| 20 | Streaming events | Kafka API, topics, keys, consumer groups | Redpanda, confluent-kafka | Done |
 | 21 | Create models | Features, backtests, model tracking | scikit-learn, MLflow | Planned |
 | 22 | Dashboards and monitoring | Operational visibility | Grafana, Prometheus | Planned |
 
@@ -1411,3 +1412,70 @@ and a query engine reading straight from the bucket.
    altitude from the lakehouse.
 5. Explain why storing the SHA-256 in object metadata makes the sync
    idempotent without a local manifest.
+
+## Lesson 20: Streaming Events With Redpanda
+
+Batch pipelines report through log files; event-driven systems publish what
+happened as it happens, and anything can subscribe. This lesson adds a
+Kafka-compatible stream to StormTrace: the pipeline's step events now flow
+onto a Redpanda topic, and a consumer reads them back live.
+
+### The Pieces
+
+```powershell
+docker compose up -d          # starts MinIO + Redpanda (Kafka API, port 9092)
+python src\publish_events.py  # publishes the latest completed run's events
+python src\consume_events.py --from-beginning   # replays the topic
+python src\consume_events.py                     # tails live events
+```
+
+- **Topic**: `stormtrace.pipeline.events` — one JSON message per pipeline
+  step event, keyed by `run_id`.
+- **Keying**: all events of one run share a key, so they land in the same
+  partition and every consumer sees each run's steps **in order**. Kafka
+  guarantees order only within a partition; key-by-run is how you get it.
+- **Headers**: each message carries an `event_step` header, so consumers
+  can filter by step without parsing the JSON body.
+
+The JSONL log file remains the source of truth; the stream is a projection
+of it. The publisher emits the most recently **completed** run (including
+its final `pipeline` summary event), which keeps the stream's runs whole.
+
+### The Advertised-Listeners Lesson
+
+The first connection failed with `Failed to resolve 'redpanda:9092'` —
+from the laptop. Kafka brokers advertise the address clients should
+**reconnect to**, and the broker was advertising its Docker-internal
+hostname. The fix is dual listeners:
+
+```text
+internal://redpanda:9092   for containers
+external://localhost:9092  for the host Python client
+```
+
+This exact misconfiguration is one of the most common real-world Kafka
+deployment bugs; meeting it here, on a laptop, is the cheapest way to learn
+it.
+
+### Optional Infrastructure, Again
+
+`publish_events` is a pipeline step that exits with code 2 when the broker
+is unreachable. The orchestrator logs that as `skipped`, and the run still
+succeeds — the same contract as `sync_minio`. The core pipeline depends on
+neither Docker service; both enrich it when present.
+
+A second hardening was needed along the way: `flush()` returns the count of
+still-undelivered messages, and only by checking that return value can a
+producer distinguish "published" from "queued and silently dropped."
+
+### Lesson 20 Exercise
+
+1. Publish, then replay, the events; match each line to a step in the
+   last pipeline run.
+2. In a second terminal, run the live consumer, then run the pipeline in
+   the first; watch the events arrive as the run progresses.
+3. Stop Redpanda, run the pipeline, and confirm `publish_events` is
+   logged as skipped.
+4. Explain why events are keyed by `run_id` rather than by step name.
+5. Propose a second topic (for example, quality-gate failures) and what
+   would publish to it.

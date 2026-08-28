@@ -1,9 +1,10 @@
-# StormTrace local lakehouse: MinIO object storage.
+# StormTrace local lakehouse and event streaming.
 #
 #   docker compose up -d
 #
-# MinIO server:  http://127.0.0.1:9000
-# MinIO console: http://127.0.0.1:9001  (login minioadmin / minioadmin)
+# MinIO server:    http://127.0.0.1:9000
+# MinIO console:   http://127.0.0.1:9001  (login minioadmin / minioadmin)
+# Redpanda broker: localhost:9092  (Kafka API compatible)
 #
 # The minio-init service creates the single 'stormtrace' bucket; zones
 # (bronze/, silver/, gold/, reports/, quality/) are prefixes inside it.
@@ -41,5 +42,36 @@ services:
       echo 'stormtrace bucket ready'
       "
 
+  # Kafka-compatible single-node broker for pipeline events. dev-container
+  # mode trades durability guarantees for a tiny footprint: exactly right
+  # for a laptop demo, exactly wrong for production data.
+  #
+  # Kafka brokers advertise the address clients should RECONNECT to, so a
+  # host-machine client and container clients need different listeners:
+  # internal://redpanda:9092 for containers, external://localhost:9092 for
+  # the host Python client (host port 9092 maps to container port 29092).
+  redpanda:
+    image: redpandadata/redpanda:latest
+    container_name: stormtrace-redpanda
+    command:
+      - redpanda
+      - start
+      - --mode dev-container
+      - --smp 1
+      - --memory 512M
+      - --overprovisioned
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:29092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:9092
+    ports:
+      - "9092:29092"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:'"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
 volumes:
   minio-data:
+  redpanda-data:

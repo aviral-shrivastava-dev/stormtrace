@@ -214,6 +214,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
         # Optional: mirrors all zones into the MinIO lakehouse when it is
         # running; exits 2 (tolerated as a skip) when it is not.
         ("sync_minio", "upload_to_minio.py", (2,)),
+        # Optional: replays this run's events onto the Redpanda stream when
+        # the broker is running; exits 2 (tolerated as a skip) when not.
+        ("publish_events", "publish_events.py", (2,)),
     ]:
         if not run_step(
             run_id, name, script, timeout=300, skipped_exit_codes=skipped_codes
