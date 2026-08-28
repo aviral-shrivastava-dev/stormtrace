@@ -101,7 +101,10 @@ SELECT
         AS element_age_hours_at_prediction,
     POWER(:mu: / POWER(h.mean_motion_revolutions_per_day * 2.0 * PI() / 86400.0, 2), 1.0/3.0)
         - :earth_radius:
-        AS mean_altitude_km_at_prediction
+        AS mean_altitude_km_at_prediction,
+    h.inclination_degrees AS inclination_degrees_at_prediction,
+    h.eccentricity AS eccentricity_at_prediction,
+    h.bstar_drag_term AS bstar_at_prediction
 FROM gold_propagation_disagreement d
 JOIN orbital_snapshot_history h
   ON h.norad_catalog_id = d.norad_catalog_id
@@ -138,6 +141,9 @@ def main() -> int:
                 total,
                 age_hours,
                 altitude,
+                inclination,
+                eccentricity,
+                bstar,
             ) = row
             if age_hours is None or altitude is None or span is None or total is None:
                 continue
@@ -167,6 +173,9 @@ def main() -> int:
                     "reliability_class": reliability_class,
                     "age_hours": round(age_hours, 2),
                     "altitude": round(altitude, 2),
+                    "inclination": inclination,
+                    "eccentricity": eccentricity,
+                    "bstar": bstar,
                     "span_hours": round(span, 2),
                     "radial_km": radial,
                     "along_km": along,
@@ -189,6 +198,9 @@ def main() -> int:
                 reliability_class VARCHAR,
                 element_age_hours_at_prediction DOUBLE,
                 mean_altitude_km_at_prediction DOUBLE,
+                inclination_degrees_at_prediction DOUBLE,
+                eccentricity_at_prediction DOUBLE,
+                bstar_at_prediction DOUBLE,
                 propagation_span_hours DOUBLE,
                 radial_km DOUBLE,
                 along_track_km DOUBLE,
@@ -204,7 +216,8 @@ def main() -> int:
                 (
                     s["norad"], s["name"], s["group"], s["base_score"],
                     s["freshness"], s["drag_safety"], s["reliability_class"],
-                    s["age_hours"], s["altitude"], s["span_hours"],
+                    s["age_hours"], s["altitude"], s["inclination"],
+                    s["eccentricity"], s["bstar"], s["span_hours"],
                     s["radial_km"], s["along_km"], s["cross_km"],
                     s["total_km"], s["km_per_hour"], s["along_dominant"],
                 )

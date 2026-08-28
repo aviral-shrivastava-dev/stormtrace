@@ -16,6 +16,11 @@ venv/
 .coverage
 htmlcov/
 
+# MLflow local tracking (SQLite backend + artifacts) and model outputs.
+mlflow.db
+mlruns/
+artifacts/
+
 # Local editor and operating-system files.
 .vscode/
 .idea/

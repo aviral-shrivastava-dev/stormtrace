@@ -80,6 +80,13 @@ Outputs land in `data\gold\` (CSV tables) and `data\reports\` (charts and
   element age correlates with error in the designed positive direction.
   The "high" class is contaminated by maneuvering spacecraft — an
   unmodeled failure mode documented in the report.
+- **A learned model beats the hand-crafted index and finds a missing
+  term**: a gradient-boosted model trained on point-in-time features
+  predicts disagreement rate with pooled Spearman 0.565 (out-of-fold,
+  grouped by object), and its strongest feature is **eccentricity**
+  (importance 0.49) — a signal the index does not use. SGP4 error grows
+  fastest on elliptical orbits (the MMS/CXO signature), so the index's
+  next revision should include an eccentricity term.
 - **Element freshness varies by object class**: median public element age
   is 9-18 hours depending on group; science satellites are tracked best,
   and roughly a quarter of cubesats carry elements older than 24 hours.
@@ -214,7 +221,7 @@ Phases 1-7 below are complete; later phases build on them.
 | 18 | Status API | Serving research outputs, graceful degradation | FastAPI | Done |
 | 19 | MinIO lakehouse | Object storage, S3 API, SQL-over-S3 | Docker, MinIO, httpfs | Done |
 | 20 | Streaming events | Kafka API, topics, keys, consumer groups | Redpanda, confluent-kafka | Done |
-| 21 | Create models | Features, backtests, model tracking | scikit-learn, MLflow | Planned |
+| 21 | Learning the index | GroupKFold, leakage control, MLflow tracking | scikit-learn, MLflow | Done |
 | 22 | Dashboards and monitoring | Operational visibility | Grafana, Prometheus | Planned |
 
 ## Rules For Scientific Honesty
@@ -1479,3 +1486,96 @@ producer distinguish "published" from "queued and silently dropped."
 4. Explain why events are keyed by `run_id` rather than by step name.
 5. Propose a second topic (for example, quality-gate failures) and what
    would publish to it.
+
+## Lesson 21: Learning The Index — ML Model With MLflow
+
+The Orbit Reliability Index encodes hand-designed physics: freshness and
+drag sensitivity weighted 0.55/0.45. This lesson asks whether a model can
+**learn** the relationship between point-in-time features and measured
+disagreement — and whether it beats the hand-crafted index.
+
+    python src\train_model.py
+
+### Setup
+
+- **Features (point-in-time correct)**: exactly what was knowable at the
+  earlier element's snapshot — altitude, element age, inclination,
+  eccentricity, bstar, source group. Nothing from the future.
+- **Target**: `log1p` of the disagreement rate (km/h), because rates span
+  orders of magnitude.
+- **Validation**: `GroupKFold` grouped by NORAD id. The same object can
+  appear in several measured pairs; random splits would leak an object's
+  behavior into the test set. Grouping makes every test object unseen.
+- **Baseline**: predicting the training median in the same folds. A model
+  is only useful if it beats the baseline.
+
+### Results (209 pairs, 138 objects)
+
+| Metric | Model | Baseline |
+|---|---:|---:|
+| MAE (log) | 0.077 | 0.098 |
+| RMSE (log) | 0.172 | 0.356 |
+| Pooled Spearman (vs true rate) | **0.565** | 0 by construction |
+
+Reference: the hand-crafted ORI scores Spearman −0.25 against the rate
+(sign flipped: higher score = lower expected error).
+
+### The Finding: Eccentricity
+
+Feature importance from the learned model:
+
+```text
+eccentricity_at_prediction     0.493
+mean_altitude_km_at_prediction 0.358
+element_age_hours_at_prediction 0.060
+bstar_at_prediction            0.054
+inclination_degrees            0.034
+```
+
+The model's strongest signal — **eccentricity** — is one the hand-crafted
+index does not use at all. Physically it makes sense: SGP4 mean-element
+error grows fastest on highly elliptical orbits (the MMS and CXO outliers
+were exactly this signature). The learned model independently confirms the
+validation finding that altitude dominates element age, and it discovers
+that orbital shape matters more than either weight suggests.
+
+**Actionable insight for the index**: the ORI should gain an eccentricity
+term. That is the kind of evidence-driven redesign validation exists to
+produce.
+
+### MLflow Tracking
+
+Every training run is logged to a local SQLite-backed MLflow store
+(`mlflow.db`, git-ignored): parameters, per-fold and aggregate metrics,
+feature importances with honest limitations, and the model artifact.
+
+Inspect the experiment:
+
+```powershell
+python -m mlflow ui --backend-store-uri sqlite:///mlflow.db
+```
+
+Note: MLflow's classic file-based store is in maintenance mode; the
+SQLite backend is the recommended local option, and the training script
+was migrated to it after hitting that exact error.
+
+### Why The Model Is Not In The Pipeline
+
+Training runs deliberately, not hourly. An hourly retrain would churn the
+model on nearly identical data, produce drifting metrics, and bury real
+changes in noise. Retrading cadence is a decision, not a default — collect
+more snapshots (especially storm-time data), then retrain and compare runs
+in MLflow.
+
+### Lesson 21 Exercise
+
+1. Run the trainer and open the MLflow UI; find the feature-importance
+   artifact and the limitations logged with the run.
+2. Explain why GroupKFold by object is required here and what a random
+   split would inflate.
+3. Compare the model's pooled Spearman (0.565) with the ORI's −0.25
+   against the rate; explain why the signs differ.
+4. Argue for or against adding an eccentricity term to the ORI using
+   both the model's importance and the MMS/CXO outlier signatures.
+5. Re-run training after a few more snapshot cycles and compare the two
+   runs side by side in the MLflow UI.
