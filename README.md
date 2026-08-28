@@ -230,6 +230,7 @@ Phases 1-7 below are complete; later phases build on them.
 | 21 | Learning the index | GroupKFold, leakage control, MLflow tracking | scikit-learn, MLflow | Done |
 | 22 | Dashboards and monitoring | Prometheus semantics, dashboards as code | Grafana, Prometheus | Done |
 | 23 | The three-pillar dataset | Debris population, daily indices, telemetry metadata, versioned APIs | CelesTrak SW, SatNOGS | Done |
+| 24 | Monitoring the research pillars | Pillar gauges on /metrics, dashboard growth, regression verification | Prometheus, Grafana | Done |
 
 ## Rules For Scientific Honesty
 
@@ -1612,10 +1613,11 @@ being scraped every 30 seconds).
 
 ### The /metrics Endpoint
 
-The API exposes ~37 Prometheus gauges computed fresh per scrape from the
+The API exposes 54 Prometheus gauges computed fresh per scrape from the
 Gold layer: quality-gate failures, tracked objects, disagreement
 statistics, ORI class counts, the environment factor, per-group
-freshness, and space-weather conditions.
+freshness, space-weather conditions, and the three research pillars
+added in Lesson 24 (daily indices, the debris cohort, SatNOGS activity).
 
 Two Prometheus semantics shaped the design:
 
@@ -1669,11 +1671,13 @@ incident before any screenshot did.
 
 ### The Dashboard
 
-Eleven panels:
+Seventeen panels:
 
 - **Stats**: Database, Quality Failures, Environment Factor, Objects
   Tracked, Measured Pairs, Median/Max Disagreement, ORI Validation
   Spearman, Space Weather
+- **Pillar stats (Lesson 24)**: Debris Cohort, Debris Stale %, Peak Daily
+  Kp Sum, Latest Kp Sum, Latest F10.7, SatNOGS Activity
 - **Time series**: Reliability Class Distribution (stacked) and Median
   Element Age by Group
 
@@ -1804,7 +1808,58 @@ ingest_satnogs: not due (data\bronze\satnogs\observations_....json is recent; wa
 5. Explain why the satellite id column is `VARCHAR` and why the SatNOGS
    collector fetches one page instead of two.
 
-## The Roadmap Complete
+## Lesson 24: Monitoring The Research Pillars
+
+Lesson 22 proved the monitoring chain (endpoint -> Prometheus -> Grafana)
+and Lesson 23 added the three-pillar dataset. This lesson closes the loop:
+`/metrics` and the dashboard now expose the pillars themselves, so the
+system status screen tells the same story as the research report.
+
+Seventeen gauges joined `/metrics`, grouped by pillar:
+
+```text
+Daily indices (gold_sw_index_daily)
+  stormtrace_sw_index_days          2110 days, newest revision per date
+  stormtrace_sw_max_kp_sum_5y       67.0  <- 2024-05-11 storm
+  stormtrace_sw_max_ap_5y / _max_f10_7_5y
+  stormtrace_sw_latest_kp_sum / _latest_ap_avg / _latest_f10_7
+
+Debris cohort (gold_debris_population)
+  stormtrace_debris_objects         111
+  stormtrace_debris_median_altitude_km / _median_bstar
+  stormtrace_debris_stale_percent
+
+SatNOGS activity (gold_satnogs_activity + history)
+  stormtrace_satnogs_days / _observations / _good_observations
+  stormtrace_satnogs_usable_observations
+  stormtrace_satnogs_distinct_satellites / _distinct_stations
+```
+
+Six stat panels joined the "StormTrace Research Status" dashboard,
+each written in the structure proven by the Lesson 22 incident — a single
+target with a `refId` and no label-interpolated legend. The regression
+tool was the arbiter again:
+
+```powershell
+python src\verify_dashboard.py
+# All 17 panels verified: every target returns data.
+```
+
+The honest verification moment matters: the new metric names existed only
+seconds after the API restarted, Prometheus had already scraped them, and
+Grafana's own `/api/ds/query` returned frames for every new panel — the
+same check that caught the eight "No data" panels in Lesson 22.
+
+### Lesson 24 Exercise
+
+1. Restart the API and confirm the 17 pillar gauges appear on `/metrics`.
+2. Re-run `python src\verify_dashboard.py`; every panel must return data,
+   not just the original eleven.
+3. Compare `Peak Daily Kp Sum` (67) with `Latest Kp Sum` on the dashboard:
+   the gap is exactly the storm data the project is still waiting to
+   capture live.
+4. The gauge cache builds one collector per (name, label-shape) — explain
+   why that stays necessary now that labeled pillar gauges exist.
 
 With Lesson 22, the planned roadmap is finished. StormTrace now spans the
 full modern data-platform arc on a student laptop: automated ingestion

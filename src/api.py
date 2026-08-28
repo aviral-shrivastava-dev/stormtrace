@@ -259,6 +259,65 @@ def metrics() -> Response:
                 gauge("stormtrace_spaceweather_max_proton_speed", "Max hourly avg proton speed (km/s)", row[1] or 0.0)
                 gauge("stormtrace_spaceweather_southward_bz_hours", "Hours with southward Bz (last 24 h)", row[2])
                 gauge("stormtrace_spaceweather_fast_wind_hours", "Hours with fast wind (last 24 h)", row[3])
+
+            if table_exists(connection, "gold_sw_index_daily"):
+                full = connection.execute(
+                    """
+                    SELECT COUNT(*), ROUND(MAX(kp_sum), 2), ROUND(MAX(ap_avg), 1),
+                           ROUND(MAX(f10_7_observed), 1)
+                    FROM gold_sw_index_daily
+                    """
+                ).fetchone()
+                latest = connection.execute(
+                    """
+                    SELECT ROUND(kp_sum, 2), ROUND(ap_avg, 1), ROUND(f10_7_observed, 1)
+                    FROM gold_sw_index_daily
+                    ORDER BY observation_date DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                latest = latest or (0.0, 0.0, 0.0)
+                gauge("stormtrace_sw_index_days", "Daily geomagnetic/solar index days recorded", full[0])
+                gauge("stormtrace_sw_max_kp_sum_5y", "Peak daily Kp sum in the window (7.0 geomagnetic storm)", full[1] or 0.0)
+                gauge("stormtrace_sw_max_ap_5y", "Peak daily average Ap in the window", full[2] or 0.0)
+                gauge("stormtrace_sw_max_f10_7_5y", "Peak daily F10.7 in the window (sfu)", full[3] or 0.0)
+                gauge("stormtrace_sw_latest_kp_sum", "Kp sum of the newest indexed day", latest[0])
+                gauge("stormtrace_sw_latest_ap_avg", "Average Ap of the newest indexed day", latest[1])
+                gauge("stormtrace_sw_latest_f10_7", "F10.7 of the newest indexed day (sfu)", latest[2])
+
+            if table_exists(connection, "gold_debris_population"):
+                row = connection.execute(
+                    """
+                    SELECT COUNT(*),
+                           ROUND(MEDIAN(mean_altitude_km), 1),
+                           ROUND(MEDIAN(bstar_drag_term), 8),
+                           ROUND(100.0 * AVG(CASE WHEN element_age_hours > 24 THEN 1.0 ELSE 0.0 END), 1)
+                    FROM gold_debris_population
+                    """
+                ).fetchone()
+                gauge("stormtrace_debris_objects", "Objects in the iridium-33 debris cohort", row[0])
+                gauge("stormtrace_debris_median_altitude_km", "Median altitude of the debris cohort (km)", row[1] or 0.0)
+                gauge("stormtrace_debris_median_bstar", "Median B* drag term of the debris cohort", row[2] or 0.0)
+                gauge("stormtrace_debris_stale_percent", "Debris objects with elements older than 24 h (%)", row[3] or 0.0)
+
+            if table_exists(connection, "gold_satnogs_activity"):
+                activity = connection.execute(
+                    """
+                    SELECT COUNT(*), COALESCE(SUM(observation_count), 0),
+                           COALESCE(SUM(good_count), 0), COALESCE(SUM(usable_count), 0)
+                    FROM gold_satnogs_activity
+                    """
+                ).fetchone()
+                distinct = connection.execute(
+                    "SELECT COUNT(DISTINCT norad_catalog_id), COUNT(DISTINCT station_id) "
+                    "FROM satnogs_observation_history"
+                ).fetchone()
+                gauge("stormtrace_satnogs_days", "Days with recorded SatNOGS observation activity", activity[0])
+                gauge("stormtrace_satnogs_observations", "SatNOGS observation events recorded", activity[1])
+                gauge("stormtrace_satnogs_good_observations", "SatNOGS observations with good status", activity[2])
+                gauge("stormtrace_satnogs_usable_observations", "SatNOGS observations usable (good or future)", activity[3])
+                gauge("stormtrace_satnogs_distinct_satellites", "Distinct NORAD objects heard by SatNOGS", distinct[0])
+                gauge("stormtrace_satnogs_distinct_stations", "Distinct SatNOGS ground stations", distinct[1])
     except DatabaseBusy:
         database_reachable.set(0)
     except duckdb.Error:

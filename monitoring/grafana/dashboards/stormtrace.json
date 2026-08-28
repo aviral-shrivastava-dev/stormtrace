@@ -376,6 +376,135 @@
       ],
       "title": "Median Element Age by Group",
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Objects in the iridium-33 debris cohort (one collision event, ~780 km band, no maneuvers). The cleanest drag signal in the catalog.",
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 17 },
+      "id": 12,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_debris_objects",
+          "refId": "A"
+        }
+      ],
+      "title": "Debris Cohort",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Debris objects whose public elements are older than 24 h. High values mean the drag signal is derived from stale ephemerides.",
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "decimals": 1, "max": 100, "min": 0 },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 17 },
+      "id": 13,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_debris_stale_percent",
+          "refId": "A"
+        }
+      ],
+      "title": "Debris Stale %",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Daily Kp sums recorded over the 5-year index window. Max possible is 72. The 2024-05-11 storm reached 67.",
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 1 }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 17 },
+      "id": 14,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_sw_max_kp_sum_5y",
+          "refId": "A"
+        }
+      ],
+      "title": "Peak Daily Kp Sum",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Newest indexed day's three-hourly Kp indices summed (provisional days may still be revised by CelesTrak).",
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 1 }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 17 },
+      "id": 15,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_sw_latest_kp_sum",
+          "refId": "A"
+        }
+      ],
+      "title": "Latest Kp Sum",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Newest indexed day's F10.7 solar flux (sfu). A rising solar-cycle baseline makes drag events more frequent.",
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 1 }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 17 },
+      "id": 16,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_sw_latest_f10_7",
+          "refId": "A"
+        }
+      ],
+      "title": "Latest F10.7",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "SatNOGS observation events recorded. Independent crowd-sourced evidence that tracked populations are still being heard.",
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 17 },
+      "id": 17,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_satnogs_observations",
+          "refId": "A"
+        }
+      ],
+      "title": "SatNOGS Activity",
+      "type": "stat"
     }
   ],
   "refresh": "1m",
