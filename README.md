@@ -91,7 +91,7 @@ Outputs land in `data\gold\` (CSV tables) and `data\reports\` (charts and
 ## Repository Structure
 
 ```text
-src\    ingestion, loading, quality gate, orchestration, analysis
+src\    ingestion, loading, quality gate, orchestration, analysis, API
 sql\    SQL transformations for Gold tables (lessons 3, 4, 8, 11, 12)
 scripts\ Windows scheduled-task setup and removal
 .github\workflows\ continuous-integration smoke test
@@ -207,11 +207,12 @@ Phases 1-7 below are complete; later phases build on them.
 | 15 | SGP4 propagation disagreement | Orbit propagation, RIC frames, migration | sgp4 | Done |
 | 16 | First real measurements, partial-load incident | Transactions, atomicity, incident response | DuckDB | Done |
 | 17 | Validate ORI against measurements | Point-in-time backtesting, Spearman correlation | Python | Done |
-| 18 | Move data into a local lakehouse | Object storage, table formats | Docker, MinIO, Iceberg | Planned |
+| 18 | Status API | Serving research outputs, graceful degradation | FastAPI | Done |
+| 19 | Move data into a local lakehouse | Object storage, table formats | Docker, MinIO, Iceberg | Planned |
 | 19 | Process larger history | Distributed processing | Spark | Planned |
 | 20 | Add real-time events | Streaming and event time | Kafka/Redpanda | Planned |
 | 21 | Create models | Features, backtests, model tracking | scikit-learn, MLflow | Planned |
-| 22 | Publish a usable product | APIs, dashboards, monitoring | FastAPI, Grafana | Planned |
+| 22 | Dashboards and monitoring | Operational visibility | Grafana, Prometheus | Planned |
 
 ## Rules For Scientific Honesty
 
@@ -1270,3 +1271,61 @@ must agree.**
    the correlations as evidence.
 5. Propose how a maneuver-detection feature could protect the high class
    from contamination.
+
+## Lesson 18: The Status API
+
+Research results locked in CSV files serve only one person. A status API
+turns StormTrace's Gold layer into a live, queryable product — the
+difference between "I analyzed data" and "I built a service".
+
+### Running The API
+
+```powershell
+python -m uvicorn src.api:app --port 8000
+```
+
+Then open <http://127.0.0.1:8000/docs> for interactive documentation that
+FastAPI generates automatically from the code.
+
+### Endpoints
+
+| Endpoint | Serves |
+|---|---|
+| `/` | Service description and endpoint index |
+| `/health` | Database reachability and table row counts |
+| `/quality` | Latest data-quality report (from the JSON artifact) |
+| `/space-weather` | Last-24-hour conditions: Bz, speed, disturbance hours |
+| `/population` | Snapshots, tracked objects, per-group freshness |
+| `/reliability` | ORI class distribution, per-group summary, 10 least reliable |
+| `/reliability/{norad_id}` | One object's full reliability breakdown |
+| `/disagreement` | SGP4 propagation disagreement statistics |
+| `/validation` | ORI validation correlations and class bins |
+
+Every reliability response carries the disclaimer that the index is not
+collision probability — scientific honesty is part of the API contract.
+
+### Design Decisions
+
+1. **Per-request read-only connections.** DuckDB allows either one writer
+   or multiple readers. While the hourly pipeline writes, API endpoints
+   return `503 Service Unavailable` with a clear message instead of
+   crashing or serving stale state silently.
+2. **No TIMESTAMPTZ fetches.** Every timestamp is cast to naive UTC inside
+   SQL before reaching Python. This avoids the `pytz` dependency issue
+   that struck twice in earlier lessons — a timezone bug class the API now
+   sidesteps by construction.
+3. **The API adds no state.** It is a pure view over the Gold tables and
+   the quality-report artifact; it can be stopped, restarted, or run
+   alongside any pipeline schedule without coordination.
+
+### Lesson 18 Exercise
+
+1. Start the API and open `/docs`; try each endpoint from the browser.
+2. Query `/reliability/25544` and verify the ISS's `drag_safety_score`
+   explains her "reduced" class despite a fresh element.
+3. Run the pipeline while the API is up and observe the `503` behavior
+   during `load_history`.
+4. Explain why the API reads the quality report from its JSON file
+   instead of the database.
+5. Propose one new endpoint that would help a satellite operator, and
+   what Gold table it would read.

@@ -3,3 +3,5 @@
 duckdb==1.5.5
 matplotlib==3.11.1
 sgp4==2.27
+fastapi==0.141.1
+uvicorn==0.52.4
