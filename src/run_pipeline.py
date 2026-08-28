@@ -75,6 +75,7 @@ def run_step(
     script: str,
     extra_args: list[str] | None = None,
     timeout: int = 300,
+    skipped_exit_codes: tuple[int, ...] = (),
 ) -> bool:
     """Run one pipeline script as a subprocess.
 
@@ -83,6 +84,10 @@ def run_step(
     growing backlog of Bronze files to checksum. A step killed by timeout
     leaves no partial data: the history loader commits each file
     atomically, and every other step rebuilds its outputs from scratch.
+
+    Exit codes listed in skipped_exit_codes are logged as a skip rather
+    than a failure (used for optional steps like the MinIO sync, which
+    reports 2 when the lakehouse is simply not running).
     """
     command = [sys.executable, str(ROOT / "src" / script), *(extra_args or [])]
     started_at = datetime.now(UTC)
@@ -97,7 +102,12 @@ def run_step(
         check=False,
     )
     duration = round(time.monotonic() - started, 3)
-    status = "success" if result.returncode == 0 else "failed"
+    if result.returncode == 0:
+        status = "success"
+    elif result.returncode in skipped_exit_codes:
+        status = "skipped"
+    else:
+        status = "failed"
     event = {
         "run_id": run_id,
         "step": name,
@@ -115,7 +125,7 @@ def run_step(
     if result.stderr.strip():
         print(result.stderr.strip(), file=sys.stderr)
     print(f"[{name}] {status} in {duration:.2f} seconds")
-    return result.returncode == 0
+    return status != "failed"
 
 
 def log_skip(run_id: str, name: str, reason: str) -> None:
@@ -192,17 +202,22 @@ def run_pipeline(args: argparse.Namespace) -> int:
     else:
         log_skip(run_id, "ingest_noaa", noaa_reason)
 
-    for name, script in [
-        ("load_history", "load_history.py"),
-        ("check_quality", "check_quality.py"),
-        ("summarize_history", "summarize_history.py"),
-        ("build_gold", "build_gold.py"),
-        ("build_orbit_features", "build_orbit_features.py"),
-        ("build_propagation_disagreement", "build_propagation_disagreement.py"),
-        ("validate_ori", "validate_ori.py"),
-        ("analyze_research", "analyze_research.py"),
+    for name, script, skipped_codes in [
+        ("load_history", "load_history.py", ()),
+        ("check_quality", "check_quality.py", ()),
+        ("summarize_history", "summarize_history.py", ()),
+        ("build_gold", "build_gold.py", ()),
+        ("build_orbit_features", "build_orbit_features.py", ()),
+        ("build_propagation_disagreement", "build_propagation_disagreement.py", ()),
+        ("validate_ori", "validate_ori.py", ()),
+        ("analyze_research", "analyze_research.py", ()),
+        # Optional: mirrors all zones into the MinIO lakehouse when it is
+        # running; exits 2 (tolerated as a skip) when it is not.
+        ("sync_minio", "upload_to_minio.py", (2,)),
     ]:
-        if not run_step(run_id, name, script):
+        if not run_step(
+            run_id, name, script, timeout=300, skipped_exit_codes=skipped_codes
+        ):
             print(f"Pipeline stopped because {name} failed.", file=sys.stderr)
             return 1
 

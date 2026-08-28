@@ -1,0 +1,45 @@
+# StormTrace local lakehouse: MinIO object storage.
+#
+#   docker compose up -d
+#
+# MinIO server:  http://127.0.0.1:9000
+# MinIO console: http://127.0.0.1:9001  (login minioadmin / minioadmin)
+#
+# The minio-init service creates the single 'stormtrace' bucket; zones
+# (bronze/, silver/, gold/, reports/, quality/) are prefixes inside it.
+# Credentials are local-development defaults: never use them for anything
+# reachable from the internet.
+
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: stormtrace-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set stormtrace http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing stormtrace/stormtrace &&
+      echo 'stormtrace bucket ready'
+      "
+
+volumes:
+  minio-data:

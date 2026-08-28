@@ -46,7 +46,7 @@ jobs:
               print(f"OK {path} ({size} bytes)")
 
       - name: Verify imports resolve without network access
-        run: python -c "import duckdb, matplotlib, sgp4, fastapi, uvicorn; print('dependencies import cleanly')"
+        run: python -c "import duckdb, matplotlib, sgp4, fastapi, uvicorn, boto3; print('dependencies import cleanly')"
 
       - name: Verify pipeline dry-run logic imports
         run: python -c "import sys; sys.path.insert(0, 'src'); import run_pipeline; print('orchestrator imports cleanly')"

@@ -47,7 +47,8 @@ summarize_history  build_gold    build_orbit_features
 
 Orchestration: `run_pipeline.py` (lock-protected, policy-aware) or the
 registered Windows scheduled task `StormTracePipeline` (hourly, with
-two-hour per-source rate limiting).
+two-hour per-source rate limiting). Each run ends by syncing all zones
+into the MinIO lakehouse when it is running (`docker compose up -d`).
 
 ## Quick Start
 
@@ -71,12 +72,13 @@ Outputs land in `data\gold\` (CSV tables) and `data\reports\` (charts and
   pairs (median span 16.3 h), the median SGP4 disagreement is 0.56 km, and
   the RIC decomposition separates drag (along-track dominant, e.g. SWIFT)
   from maneuvers (radial-dominant, e.g. the MMS formation).
-- **The Orbit Reliability Index is directionally validated**: median
-  measured error rises monotonically across the moderate → reduced → low
-  predicted classes (0.2 → 0.6 → 2.3 km); Spearman score-vs-error is −0.36
-  (−0.47 on the drag-like subset). Altitude is currently the strongest
-  single predictor, and the "high" class is contaminated by maneuvering
-  spacecraft — an unmodeled failure mode documented in the report.
+- **The Orbit Reliability Index is directionally validated**: across 209
+  refreshed element pairs, median measured error rises monotonically across
+  the moderate → reduced → low predicted classes (0.2 → 0.5 → 2.2 km);
+  Spearman score-vs-error is −0.43 (−0.50 on the drag-like subset), and
+  element age correlates with error in the designed positive direction.
+  The "high" class is contaminated by maneuvering spacecraft — an
+  unmodeled failure mode documented in the report.
 - **Element freshness varies by object class**: median public element age
   is 9-18 hours depending on group; science satellites are tracked best,
   and roughly a quarter of cubesats carry elements older than 24 hours.
@@ -95,6 +97,7 @@ src\    ingestion, loading, quality gate, orchestration, analysis, API
 sql\    SQL transformations for Gold tables (lessons 3, 4, 8, 11, 12)
 scripts\ Windows scheduled-task setup and removal
 .github\workflows\ continuous-integration smoke test
+docker-compose.yml  MinIO lakehouse (S3-compatible object storage)
 data\   bronze/ silver/ gold/ reports/ quality/ logs/  (not committed)
 ```
 
@@ -208,8 +211,7 @@ Phases 1-7 below are complete; later phases build on them.
 | 16 | First real measurements, partial-load incident | Transactions, atomicity, incident response | DuckDB | Done |
 | 17 | Validate ORI against measurements | Point-in-time backtesting, Spearman correlation | Python | Done |
 | 18 | Status API | Serving research outputs, graceful degradation | FastAPI | Done |
-| 19 | Move data into a local lakehouse | Object storage, table formats | Docker, MinIO, Iceberg | Planned |
-| 19 | Process larger history | Distributed processing | Spark | Planned |
+| 19 | MinIO lakehouse | Object storage, S3 API, SQL-over-S3 | Docker, MinIO, httpfs | Done |
 | 20 | Add real-time events | Streaming and event time | Kafka/Redpanda | Planned |
 | 21 | Create models | Features, backtests, model tracking | scikit-learn, MLflow | Planned |
 | 22 | Dashboards and monitoring | Operational visibility | Grafana, Prometheus | Planned |
@@ -1329,3 +1331,83 @@ collision probability — scientific honesty is part of the API contract.
    instead of the database.
 5. Propose one new endpoint that would help a satellite operator, and
    what Gold table it would read.
+
+## Lesson 19: The MinIO Lakehouse
+
+Everything so far lived in one DuckDB file plus folders on a laptop. Real
+data platforms separate **storage from compute**: data lives in object
+storage, and engines read it wherever they run. This lesson builds that
+architecture locally with Docker and MinIO.
+
+### Starting The Lakehouse
+
+```powershell
+docker compose up -d
+```
+
+That starts MinIO (an S3-compatible object store) and creates the
+`stormtrace` bucket. The console is at <http://127.0.0.1:9001>
+(login `minioadmin` / `minioadmin`) — browse the zones there after syncing.
+
+### Syncing Data Into The Lakehouse
+
+```powershell
+python src\upload_to_minio.py
+```
+
+Every file under `data\bronze`, `silver`, `gold`, `reports`, and `quality`
+is uploaded with its SHA-256 digest stored as object metadata. Re-running
+skips objects whose digest already matches, so syncing is idempotent and
+cheap — the same digest discipline as the Bronze registry.
+
+The zone layout inside the bucket:
+
+```text
+s3://stormtrace/bronze/celestrak/stations_20260827T123130Z.csv
+s3://stormtrace/silver/stations_satellites_latest.csv
+s3://stormtrace/gold/orbit_reliability_index.csv
+s3://stormtrace/reports/ori_validation.png
+s3://stormtrace/quality/latest_report.json
+```
+
+### Querying The Lakehouse Directly
+
+```powershell
+python src\query_minio.py
+```
+
+DuckDB's `httpfs` extension speaks the S3 API, so `read_csv_auto` scans
+objects inside MinIO as if they were local files. The demo counts all
+bronze orbital rows, groups objects by source, computes the cubesat
+population's median altitude from mean motion — entirely inside the
+object store. Nothing is downloaded to the laptop.
+
+This is the essential lakehouse trick: **compute travels to the storage**.
+
+### Pipeline Integration
+
+The pipeline's final step is now `sync_minio`. When MinIO is running, each
+run uploads exactly the files it regenerated (typically five). When MinIO
+is stopped, the step exits with code 2, which the orchestrator logs as
+`skipped` — the pipeline still succeeds. Optional infrastructure must
+never break the core pipeline.
+
+### Why This Matters For Hiring
+
+Object storage plus SQL-over-S3 is the core of every modern data platform
+(S3 + Athena, GCS + BigQuery external tables, ADLS + Databricks). This
+lesson demonstrates the pattern with the same APIs, locally, on a student
+laptop: Docker orchestration, an S3-compatible store, idempotent sync,
+and a query engine reading straight from the bucket.
+
+### Lesson 19 Exercise
+
+1. Run `docker compose up -d`, sync, then browse the bucket in the MinIO
+   console at port 9001.
+2. Run the sync twice and confirm the second run uploads nothing.
+3. Stop MinIO (`docker compose stop minio`), run the pipeline, and confirm
+   `sync_minio` is logged as skipped while everything else succeeds.
+4. Modify `src\query_minio.py` to compute the stations group's median
+   altitude from the lakehouse.
+5. Explain why storing the SHA-256 in object metadata makes the sync
+   idempotent without a local manifest.
