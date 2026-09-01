@@ -26,9 +26,16 @@ MLflow tracking stores the experiment in a local SQLite database
 
     python -m mlflow ui --backend-store-uri sqlite:///mlflow.db
 
-Honest limitations, logged with the run: 209 pairs from one quiet day is a
-small sample; grouped CV is not temporal validation; the environment
-factor has no storm data to learn from yet.
+Honest limitations, logged with the run: the sample is small and drawn
+from a short collection window; grouped CV is not temporal validation;
+the environment factor has no storm data to learn from yet. Only
+analysis-grade pairs (inside the SGP4 envelope) are used, and the ORI
+reference correlations are read from the warehouse rather than hardcoded,
+so the comparison always describes the same data.
+
+Exits 2 when fewer than MIN_TRAINING_PAIRS usable pairs exist; the
+orchestrator logs that as a skip, because too little data is an expected
+early state rather than a failure.
 """
 
 from __future__ import annotations
@@ -52,6 +59,10 @@ MLFLOW_DB = ROOT / "mlflow.db"
 MODEL_REPORT = ROOT / "data" / "reports" / "model_summary.json"
 
 EXPERIMENT = "stormtrace-disagreement"
+
+# Below this many usable pairs, training is not meaningful and the script
+# exits 2 so the pipeline logs a skip rather than a failure.
+MIN_TRAINING_PAIRS = 30
 
 NUMERIC_FEATURES = [
     "element_age_hours_at_prediction",
@@ -80,13 +91,16 @@ def load_dataset(connection: duckdb.DuckDBPyConnection) -> tuple[np.ndarray, np.
           AND km_per_hour > 0
         """
     ).fetchall()
-    if len(rows) < 30:
+    if len(rows) < MIN_TRAINING_PAIRS:
         print(
-            f"Only {len(rows)} usable pairs; at least 30 are required to "
-            "train meaningfully. Keep collecting snapshots.",
+            f"Only {len(rows)} usable pairs; at least {MIN_TRAINING_PAIRS} are "
+            "required to train meaningfully. Keep collecting snapshots.",
             file=sys.stderr,
         )
-        raise SystemExit(1)
+        # Exit 2, not 1: the orchestrator treats this as a tolerated skip.
+        # Too little data is an expected early state, not a broken step.
+        raise SystemExit(2)
+
 
     groups = np.array([row[7] for row in rows])
     rates = np.array([row[6] for row in rows], dtype=float)
@@ -108,6 +122,37 @@ def load_dataset(connection: duckdb.DuckDBPyConnection) -> tuple[np.ndarray, np.
     return np.array(matrix_rows), targets, groups, feature_names
 
 
+def ori_reference(connection: duckdb.DuckDBPyConnection) -> dict[str, float]:
+    """Read the hand-crafted index's own correlations from the warehouse.
+
+    These used to be hardcoded constants that drifted away from the values
+    validate_ori.py actually produced. Reading them keeps the model/index
+    comparison honest for whatever data has been collected so far.
+    """
+    if not table_exists(connection, "gold_ori_validation_stats"):
+        return {}
+    rows = connection.execute(
+        """
+        SELECT metric, value FROM gold_ori_validation_stats
+        WHERE metric IN (
+            'spearman_score_vs_km_per_hour',
+            'spearman_score_vs_total_km'
+        )
+        """
+    ).fetchall()
+    return {metric: float(value) for metric, value in rows}
+
+
+def table_exists(connection: duckdb.DuckDBPyConnection, name: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+            [name],
+        ).fetchone()[0]
+        > 0
+    )
+
+
 def main() -> int:
     if not DATABASE.exists():
         print("Run earlier lessons first. The DuckDB database is missing.", file=sys.stderr)
@@ -116,14 +161,16 @@ def main() -> int:
     connection = duckdb.connect(str(DATABASE), read_only=True)
     try:
         features, targets, groups, feature_names = load_dataset(connection)
+        reference = ori_reference(connection)
     finally:
         connection.close()
+
 
     n_pairs = len(targets)
     n_objects = len(set(groups.tolist()))
     print("StormTrace lesson 21 model training")
     print(f"Training pairs: {n_pairs:,} from {n_objects:,} objects")
-    print(f"Target: log1p of disagreement rate (km/h)")
+    print("Target: log1p of disagreement rate (km/h)")
     print()
 
     model_params = {
@@ -185,7 +232,7 @@ def main() -> int:
     model.fit(features, targets)
     importance = model.feature_importances_
     ranked = sorted(
-        zip(feature_names, importance.tolist()), key=lambda item: -item[1]
+        zip(feature_names, importance.tolist(), strict=True), key=lambda item: -item[1]
     )
 
     def average(metrics: list[dict[str, float]], key: str) -> float:
@@ -210,9 +257,19 @@ def main() -> int:
     print(f"  Baseline RMSE (log): {baseline_rmse:.4f}")
     print(f"  Pooled Spearman (predicted vs true rate): {pooled_spearman:.3f}")
     print()
-    print("Reference: the hand-crafted ORI scores")
-    print("  Spearman -0.25 vs rate, -0.43 vs total km (all pairs).")
+    print("Reference: the hand-crafted ORI scores, read from")
+    print("gold_ori_validation_stats (analysis-grade pairs):")
+    if reference:
+        rate_reference = reference.get("spearman_score_vs_km_per_hour")
+        total_reference = reference.get("spearman_score_vs_total_km")
+        print(
+            f"  Spearman {rate_reference:+.3f} vs rate, "
+            f"{total_reference:+.3f} vs total km."
+        )
+    else:
+        print("  Not available yet: run src\\validate_ori.py first.")
     print()
+
     print("Feature importance (top 5):")
     for name, score in ranked[:5]:
         print(f"  {name:<40} {score:.3f}")
@@ -251,9 +308,11 @@ def main() -> int:
                     for name, score in ranked
                 ],
                 "limitations": [
-                    f"Only {n_pairs} pairs from one quiet day; small sample.",
+                    f"{n_pairs} pairs from {n_objects} objects over a short "
+                    "collection window; still a small sample.",
                     "GroupKFold prevents object leakage but is not temporal "
                     "validation.",
+
                     "No disturbed space-weather period is included, so no "
                     "environment features could be learned.",
                     "The later element is not ground truth; the target is "
@@ -280,8 +339,13 @@ def main() -> int:
                 "model_mae_log": round(model_mae, 4),
                 "baseline_mae_log": round(baseline_mae, 4),
                 "model_spearman_pooled": round(pooled_spearman, 4),
-                "ori_reference_spearman_vs_rate": -0.2519,
-                "ori_reference_spearman_vs_total": -0.4277,
+                "ori_reference_spearman_vs_rate": reference.get(
+                    "spearman_score_vs_km_per_hour"
+                ),
+                "ori_reference_spearman_vs_total": reference.get(
+                    "spearman_score_vs_total_km"
+                ),
+
                 "top_features": [
                     {"feature": name, "importance": round(score, 4)}
                     for name, score in ranked[:5]

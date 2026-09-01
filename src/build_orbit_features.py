@@ -7,9 +7,10 @@ from pathlib import Path
 
 try:
     import duckdb
-except ImportError:
+except ImportError as error:
     print("DuckDB is not installed. Run: python -m pip install duckdb")
-    raise SystemExit(1)
+    raise SystemExit(1) from error
+
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

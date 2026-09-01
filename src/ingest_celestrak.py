@@ -10,7 +10,6 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-
 # Tracked CelesTrak GP groups. The small stations group covers crewed
 # vehicles; the cubesat group adds a large drag-sensitive LEO population
 # for population-level research. The science group adds several hundred

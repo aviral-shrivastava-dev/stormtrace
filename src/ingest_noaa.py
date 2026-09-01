@@ -10,7 +10,6 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BRONZE_DIR = PROJECT_ROOT / "data" / "bronze" / "noaa"
 SILVER_DIR = PROJECT_ROOT / "data" / "silver"

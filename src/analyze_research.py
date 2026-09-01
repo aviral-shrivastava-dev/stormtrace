@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
-
 import matplotlib
 
 matplotlib.use("Agg")
@@ -95,7 +94,6 @@ def chart_sw_index_daily(connection: duckdb.DuckDBPyConnection) -> Path | None:
     if not rows:
         return None
 
-    from datetime import date
 
     dates = [row[0] for row in rows]
     kp_sums = [float(row[1]) if row[1] is not None else None for row in rows]
@@ -344,6 +342,7 @@ def chart_propagation_disagreement(connection: duckdb.DuckDBPyConnection) -> Pat
         """
         SELECT source_group, propagation_span_hours, total_km
         FROM gold_propagation_disagreement
+        WHERE measurement_quality = 'ok'
         """,
     )
     if not rows:
@@ -437,7 +436,7 @@ def sw_index_summary(connection: duckdb.DuckDBPyConnection) -> dict[str, object]
         """
     )
     row = relation.fetchone()
-    return dict(zip(relation.columns, row))
+    return dict(zip(relation.columns, row, strict=True))
 
 
 def satnogs_summary(connection: duckdb.DuckDBPyConnection) -> dict[str, object]:
@@ -451,13 +450,19 @@ def satnogs_summary(connection: duckdb.DuckDBPyConnection) -> dict[str, object]:
             COUNT(*) AS day_count,
             SUM(observation_count) AS total_observations,
             SUM(good_count) AS total_good,
+            SUM(completed_count) AS total_completed,
+            SUM(scheduled_count) AS total_scheduled,
+            ROUND(
+                100.0 * SUM(good_count) / NULLIF(SUM(completed_count), 0), 1
+            ) AS good_percent_of_completed,
             SUM(distinct_satellites) AS satellite_hears_seen,
             SUM(distinct_stations) AS station_hears_seen
         FROM gold_satnogs_activity
         """
     )
+
     row = relation.fetchone()
-    return dict(zip(relation.columns, row))
+    return dict(zip(relation.columns, row, strict=True))
 
 
 def debris_summary(connection: duckdb.DuckDBPyConnection) -> dict[str, object]:
@@ -477,7 +482,7 @@ def debris_summary(connection: duckdb.DuckDBPyConnection) -> dict[str, object]:
         """
     )
     row = relation.fetchone()
-    return dict(zip(relation.columns, row))
+    return dict(zip(relation.columns, row, strict=True))
 
 
 def space_weather_summary(connection: duckdb.DuckDBPyConnection) -> dict[str, object]:
@@ -494,7 +499,7 @@ def space_weather_summary(connection: duckdb.DuckDBPyConnection) -> dict[str, ob
         """
     )
     row = relation.fetchone()
-    return dict(zip(relation.columns, row))
+    return dict(zip(relation.columns, row, strict=True))
 
 
 def population_by_group(connection: duckdb.DuckDBPyConnection) -> list[tuple[str, int]]:
@@ -644,6 +649,7 @@ def write_report(
                 ROUND(MEDIAN(radial_km), 3),
                 ROUND(MEDIAN(cross_track_km), 3)
             FROM gold_propagation_disagreement
+            WHERE measurement_quality = 'ok'
             """,
         )
         if disagreement_stats and disagreement_stats[0][0]:
@@ -657,6 +663,13 @@ def write_report(
                 median_radial,
                 median_cross,
             ) = disagreement_stats[0]
+            excluded_pairs = fetch_rows(
+                connection,
+                """
+                SELECT COUNT(*) FROM gold_propagation_disagreement
+                WHERE measurement_quality <> 'ok'
+                """,
+            )[0][0]
             lines += [
                 "## SGP4 Propagation Disagreement",
                 "",
@@ -667,7 +680,7 @@ def write_report(
                 "",
                 "| Metric | Value |",
                 "|---|---:|",
-                f"| Measured pairs | {pair_count:,} |",
+                f"| Analysis-grade pairs | {pair_count:,} |",
                 f"| Median propagation span | {median_span} h |",
                 f"| Maximum propagation span | {max_span} h |",
                 f"| Median total disagreement | {median_total} km |",
@@ -675,6 +688,7 @@ def write_report(
                 f"| Median along-track | {median_along} km |",
                 f"| Median radial | {median_radial} km |",
                 f"| Median cross-track | {median_cross} km |",
+                f"| Excluded (outside SGP4 envelope) | {excluded_pairs:,} |",
                 "",
                 "The later element is not perfect ground truth; this is the",
                 "disagreement between successive public estimates. The",
@@ -682,6 +696,13 @@ def write_report(
                 "expected signature of drag-model error accumulating along",
                 "the velocity direction.",
                 "",
+                "Excluded pairs are kept in the Gold table as evidence but left",
+                "out of every statistic: SGP4 cannot be trusted past ~72 h, and",
+                "a disagreement above 500 km indicates a bad element rather",
+                "than measurable drag. Including them once put a 5,079 km",
+                "outlier into the reported maximum and the ML target.",
+                "",
+
             ]
             worst = fetch_rows(
                 connection,
@@ -691,6 +712,7 @@ def write_report(
                        ROUND(total_km, 2),
                        ROUND(along_track_km, 2)
                 FROM gold_propagation_disagreement
+                WHERE measurement_quality = 'ok'
                 ORDER BY total_km DESC
                 LIMIT 10
                 """,
@@ -972,6 +994,12 @@ def write_report(
         ]
     satnogs = satnogs_summary(connection)
     if satnogs:
+        rate = satnogs.get("good_percent_of_completed")
+        rate_text = (
+            f"{rate}% of completed passes were good"
+            if rate is not None
+            else "no pass has completed yet, so the good rate is unknown"
+        )
         lines += [
             "### SatNOGS Observation Activity",
             "",
@@ -981,16 +1009,26 @@ def write_report(
             "",
             f"- Observation days: {satnogs['day_count']:,} "
             f"({satnogs['first_date']} to {satnogs['last_date']})",
-            f"- Observations sampled: {satnogs['total_observations']:,} "
-            f"({satnogs['total_good']:,} good)",
+            f"- Distinct observations: {satnogs['total_observations']:,}",
+            f"- Completed passes: {satnogs['total_completed']:,} "
+            f"({satnogs['total_good']:,} good); {rate_text}",
+            f"- Still scheduled (future): {satnogs['total_scheduled']:,}",
             f"- Distinct satellites heard: {satnogs['satellite_hears_seen']:,}",
             f"- Distinct ground stations heard: {satnogs['station_hears_seen']:,}",
             "",
-            "Coverage is a polite rolling sample (two API pages per run),",
-            "enough to quantify tracking activity before and during",
-            "disturbances, not to reconstruct full telemetry history.",
+            "Counting is per distinct observation, using each observation's",
+            "newest recorded version: the history table keeps a scheduled pass",
+            "and its later vetted outcome as separate evidence rows, so a",
+            "naive row count would double-count the same pass.",
+            "",
+            "Coverage is a polite bounded sample per run: the newest listing,",
+            "one sweep per terminal status, and a capped number of previously",
+            "scheduled passes re-checked once their window closed. Enough to",
+            "quantify tracking activity around disturbances, not to",
+            "reconstruct full telemetry history.",
             "",
         ]
+
 
     lines += [
         "## Charts",
@@ -1129,6 +1167,7 @@ def main() -> int:
                 SELECT COUNT(*), ROUND(MEDIAN(total_km), 3), ROUND(MAX(total_km), 3),
                        ROUND(MEDIAN(propagation_span_hours), 2)
                 FROM gold_propagation_disagreement
+                WHERE measurement_quality = 'ok'
                 """,
             )[0]
         validation_stats_console = None
@@ -1179,7 +1218,7 @@ def main() -> int:
     if disagreement_summary and disagreement_summary[0]:
         pair_count, median_total, max_total, median_span = disagreement_summary
         print("SGP4 propagation disagreement (real measurements):")
-        print(f"  Measured pairs: {pair_count:,}")
+        print(f"  Analysis-grade pairs: {pair_count:,}")
         print(f"  Median total: {median_total} km, max: {max_total} km")
         print(f"  Median propagation span: {median_span} h")
         print()
@@ -1211,13 +1250,18 @@ def main() -> int:
         print()
     satnogs = satnogs_console
     if satnogs:
+        rate = satnogs.get("good_percent_of_completed")
+        rate_text = f"{rate}% good" if rate is not None else "good rate unknown"
         print("SatNOGS observation activity:")
-        print(f"  Observations: {satnogs['total_observations']:,} "
-              f"({satnogs['total_good']:,} good), days "
+        print(f"  Distinct observations: {satnogs['total_observations']:,}, days "
               f"{satnogs['first_date']} to {satnogs['last_date']}")
+        print(f"  Completed: {satnogs['total_completed']:,} "
+              f"({satnogs['total_good']:,} good, {rate_text}), "
+              f"scheduled: {satnogs['total_scheduled']:,}")
         print(f"  Distinct satellites heard: {satnogs['satellite_hears_seen']:,}, "
               f"stations: {satnogs['station_hears_seen']:,}")
         print()
+
     if snapshot_count < 2:
         print("Orbit-change detection is ready but needs at least 2 snapshots.")
         print("Keep collecting every 2 hours with: python src\\run_pipeline.py")
