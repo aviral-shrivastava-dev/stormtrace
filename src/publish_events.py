@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -29,9 +30,10 @@ from confluent_kafka.error import KafkaError, KafkaException
 ROOT = Path(__file__).resolve().parents[1]
 LOG_PATH = ROOT / "data" / "logs" / "pipeline_runs.jsonl"
 
-BOOTSTRAP = "127.0.0.1:9092"
-TOPIC = "stormtrace.pipeline.events"
+BOOTSTRAP = os.environ.get("STORMTRACE_KAFKA_BOOTSTRAP", "127.0.0.1:9092")
+TOPIC = os.environ.get("STORMTRACE_KAFKA_TOPIC", "stormtrace.pipeline.events")
 DELIVERY_TIMEOUT = 15
+
 
 
 def load_events(all_events: bool) -> list[dict[str, object]]:

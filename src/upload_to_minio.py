@@ -23,11 +23,23 @@ The lakehouse layout mirrors the local zones inside one bucket:
     s3://stormtrace/quality/...
 
 Git keeps the code; the object store keeps the data.
+
+Credentials come from the environment, with the local docker-compose
+defaults as a fallback so a fresh clone works without setup:
+
+    STORMTRACE_S3_ENDPOINT   default http://127.0.0.1:9000
+    STORMTRACE_S3_BUCKET     default stormtrace
+    STORMTRACE_S3_ACCESS_KEY default minioadmin
+    STORMTRACE_S3_SECRET_KEY default minioadmin
+
+Those defaults are development-only. Anything reachable beyond localhost
+must set real credentials in the environment.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 from pathlib import Path
 
@@ -38,13 +50,14 @@ from botocore.exceptions import ClientError, EndpointConnectionError
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 
-ENDPOINT = "http://127.0.0.1:9000"
-BUCKET = "stormtrace"
-ACCESS_KEY = "minioadmin"
-SECRET_KEY = "minioadmin"
+ENDPOINT = os.environ.get("STORMTRACE_S3_ENDPOINT", "http://127.0.0.1:9000")
+BUCKET = os.environ.get("STORMTRACE_S3_BUCKET", "stormtrace")
+ACCESS_KEY = os.environ.get("STORMTRACE_S3_ACCESS_KEY", "minioadmin")
+SECRET_KEY = os.environ.get("STORMTRACE_S3_SECRET_KEY", "minioadmin")
 
 SYNCED_ZONES = ["bronze", "silver", "gold", "reports", "quality"]
 CHUNK_SIZE = 1024 * 1024
+
 
 
 def file_digest(path: Path) -> str:

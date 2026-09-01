@@ -13,10 +13,15 @@ up on the laptop.
 
 The first run downloads the httpfs extension from DuckDB's official
 repository; subsequent runs use the cached copy.
+
+Credentials come from the environment (STORMTRACE_S3_*), with the local
+docker-compose defaults as a fallback. Those defaults are
+development-only.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -24,21 +29,33 @@ import duckdb
 
 ROOT = Path(__file__).resolve().parents[1]
 
-ENDPOINT = "127.0.0.1:9000"
-ACCESS_KEY = "minioadmin"
-SECRET_KEY = "minioadmin"
-BUCKET = "stormtrace"
+# The httpfs extension wants a bare host:port, so any scheme is stripped.
+ENDPOINT = (
+    os.environ.get("STORMTRACE_S3_ENDPOINT", "http://127.0.0.1:9000")
+    .removeprefix("https://")
+    .removeprefix("http://")
+)
+ACCESS_KEY = os.environ.get("STORMTRACE_S3_ACCESS_KEY", "minioadmin")
+SECRET_KEY = os.environ.get("STORMTRACE_S3_SECRET_KEY", "minioadmin")
+BUCKET = os.environ.get("STORMTRACE_S3_BUCKET", "stormtrace")
+USE_SSL = os.environ.get("STORMTRACE_S3_ENDPOINT", "").startswith("https://")
 
 
 def configure(connection: duckdb.DuckDBPyConnection) -> None:
     connection.execute("INSTALL httpfs")
     connection.execute("LOAD httpfs")
-    connection.execute(f"SET s3_endpoint = '{ENDPOINT}'")
-    connection.execute(f"SET s3_access_key_id = '{ACCESS_KEY}'")
-    connection.execute(f"SET s3_secret_access_key = '{SECRET_KEY}'")
-    connection.execute("SET s3_use_ssl = false")
-    connection.execute("SET s3_url_style = 'path'")
-    connection.execute("SET s3_region = 'us-east-1'")
+    # Parameterized SET is not supported for these settings, so values are
+    # passed through DuckDB's own escaping of single quotes.
+    for setting, value in [
+        ("s3_endpoint", ENDPOINT),
+        ("s3_access_key_id", ACCESS_KEY),
+        ("s3_secret_access_key", SECRET_KEY),
+        ("s3_url_style", "path"),
+        ("s3_region", "us-east-1"),
+    ]:
+        connection.execute(f"SET {setting} = '{value.replace(chr(39), chr(39) * 2)}'")
+    connection.execute(f"SET s3_use_ssl = {'true' if USE_SSL else 'false'}")
+
 
 
 def main() -> int:

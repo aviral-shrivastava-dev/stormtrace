@@ -3,7 +3,7 @@
 #   docker compose up -d
 #
 # MinIO server:    http://127.0.0.1:9000
-# MinIO console:   http://127.0.0.1:9001  (login minioadmin / minioadmin)
+# MinIO console:   http://127.0.0.1:9001
 # Redpanda broker: localhost:9092  (Kafka API compatible)
 # Prometheus:      http://127.0.0.1:9090
 # Grafana:         http://127.0.0.1:3000  (anonymous read-only access)
@@ -11,8 +11,17 @@
 # Prometheus scrapes the StormTrace API on the HOST; start it with:
 #   python -m uvicorn src.api:app --port 8000
 #
-# Credentials are local-development defaults: never use them for anything
-# reachable from the internet.
+# CREDENTIALS
+# -----------
+# Every credential below reads from the environment with a weak local
+# default, so a fresh clone works with no setup. Copy .env.example to .env
+# and change the values before exposing any of these ports beyond
+# localhost; the defaults are not secrets and must never guard anything
+# reachable from a network.
+#
+# The API itself has NO authentication. It is read-only over public data,
+# but /metrics exposes the full research state, so bind it to localhost
+# only, as the commands above do.
 
 services:
   minio:
@@ -20,11 +29,11 @@ services:
     container_name: stormtrace-minio
     command: server /data --console-address ":9001"
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${STORMTRACE_S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${STORMTRACE_S3_SECRET_KEY:-minioadmin}
     volumes:
       - minio-data:/data
     healthcheck:
@@ -38,12 +47,17 @@ services:
     depends_on:
       minio:
         condition: service_healthy
+    environment:
+      MINIO_ACCESS_KEY: ${STORMTRACE_S3_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${STORMTRACE_S3_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${STORMTRACE_S3_BUCKET:-stormtrace}
     entrypoint: >
       /bin/sh -c "
-      mc alias set stormtrace http://minio:9000 minioadmin minioadmin &&
-      mc mb --ignore-existing stormtrace/stormtrace &&
-      echo 'stormtrace bucket ready'
+      mc alias set stormtrace http://minio:9000 \"$$MINIO_ACCESS_KEY\" \"$$MINIO_SECRET_KEY\" &&
+      mc mb --ignore-existing \"stormtrace/$$MINIO_BUCKET\" &&
+      echo \"$$MINIO_BUCKET bucket ready\"
       "
+
 
   # Kafka-compatible single-node broker for pipeline events. dev-container
   # mode trades durability guarantees for a tiny footprint: exactly right
@@ -66,9 +80,10 @@ services:
       - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:29092
       - --advertise-kafka-addr internal://redpanda:9092,external://localhost:9092
     ports:
-      - "9092:29092"
+      - "127.0.0.1:9092:29092"
     volumes:
       - redpanda-data:/var/lib/redpanda/data
+
     healthcheck:
       test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:'"]
       interval: 10s
@@ -83,7 +98,7 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=7d
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -100,12 +115,16 @@ services:
     depends_on:
       - prometheus
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_SECURITY_ADMIN_PASSWORD: ${STORMTRACE_GRAFANA_PASSWORD:-admin}
+      # Anonymous Viewer access is deliberate for a local research board
+      # bound to localhost. Set GF_AUTH_ANONYMOUS_ENABLED=false before
+      # exposing Grafana anywhere else.
+      GF_AUTH_ANONYMOUS_ENABLED: "${STORMTRACE_GRAFANA_ANONYMOUS:-true}"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/stormtrace.json
+
     volumes:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro

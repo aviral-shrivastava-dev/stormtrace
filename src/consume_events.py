@@ -21,17 +21,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import time
 import uuid
 from collections import Counter
-from datetime import datetime
 
 from confluent_kafka import Consumer
 from confluent_kafka.error import KafkaException
 
-BOOTSTRAP = "127.0.0.1:9092"
-TOPIC = "stormtrace.pipeline.events"
+BOOTSTRAP = os.environ.get("STORMTRACE_KAFKA_BOOTSTRAP", "127.0.0.1:9092")
+TOPIC = os.environ.get("STORMTRACE_KAFKA_TOPIC", "stormtrace.pipeline.events")
 POLL_TIMEOUT = 1.0
+
 IDLE_LIMIT_SECONDS = 5
 
 
@@ -96,7 +98,9 @@ def main() -> int:
 
     counts: Counter[str] = Counter()
     consumed = 0
-    last_activity_at = datetime.now()
+    # Idle time is measured with a monotonic clock: it cannot jump when the
+    # system clock is adjusted, and it needs no timezone.
+    last_activity_at = time.monotonic()
     # In replay mode the topic may legitimately be empty; wait longer
     # before giving up so a slow broker start is not mistaken for EOF.
     initial_wait = 20 if args.from_beginning else 5
@@ -104,7 +108,7 @@ def main() -> int:
         while True:
             message = consumer.poll(POLL_TIMEOUT)
             if message is None:
-                idle_seconds = (datetime.now() - last_activity_at).total_seconds()
+                idle_seconds = time.monotonic() - last_activity_at
                 if consumed > 0 and idle_seconds > IDLE_LIMIT_SECONDS:
                     break
                 if consumed == 0 and idle_seconds > initial_wait:
@@ -117,7 +121,8 @@ def main() -> int:
             print(format_event(event))
             counts[str(event.get("status", "?"))] += 1
             consumed += 1
-            last_activity_at = datetime.now()
+            last_activity_at = time.monotonic()
+
     except KeyboardInterrupt:
         print()
     finally:

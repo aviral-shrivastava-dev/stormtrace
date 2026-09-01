@@ -27,3 +27,7 @@ artifacts/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Local service credentials. .env.example is committed as the template.
+.env
+
