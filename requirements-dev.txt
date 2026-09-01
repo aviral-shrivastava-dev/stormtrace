@@ -1,0 +1,4 @@
+# Development and CI tooling. Runtime dependencies live in
+# requirements.txt; nothing here is needed to run the pipeline.
+pytest==9.1.1
+ruff==0.16.5

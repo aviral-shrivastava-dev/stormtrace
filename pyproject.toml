@@ -1,0 +1,37 @@
+[project]
+name = "stormtrace"
+version = "0.3.0"
+description = "Space-weather-aware reliability of public satellite orbit data"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+# src/ is a directory of scripts, not an installed package; tests/conftest.py
+# puts it on sys.path.
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 90
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "I",     # import sorting
+    "UP",    # pyupgrade
+    "B",     # bugbear
+    "DTZ",   # timezone-aware datetimes (this project is UTC-only)
+    "RUF",
+]
+ignore = [
+    # Long SQL strings and printed report lines read better unwrapped than
+    # broken across lines.
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately construct naive datetimes to match what DuckDB
+# returns, and use assert statements throughout.
+"tests/*" = ["DTZ001", "B011"]
