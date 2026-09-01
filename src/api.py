@@ -21,10 +21,11 @@ Design notes:
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import duckdb
 from fastapi import FastAPI, HTTPException
@@ -65,8 +66,9 @@ def database() -> Iterator[duckdb.DuckDBPyConnection]:
         raise HTTPException(status_code=503, detail="Database not built yet.")
     try:
         connection = duckdb.connect(str(DATABASE), read_only=True)
-    except duckdb.Error:
-        raise DatabaseBusy()
+    except duckdb.Error as error:
+        raise DatabaseBusy() from error
+
     try:
         yield connection
     finally:
@@ -180,17 +182,27 @@ def metrics() -> Response:
             gauge("stormtrace_plasma_history_rows", "Rows in plasma history", counts["noaa_plasma_history"])
 
             if table_exists(connection, "gold_propagation_disagreement"):
+                # Analysis-grade pairs only, matching /disagreement and the
+                # research report. A single 5,000 km outlier previously moved
+                # the "max" gauge by four orders of magnitude.
                 row = connection.execute(
                     """
                     SELECT COUNT(*), ROUND(MEDIAN(total_km), 3), ROUND(MAX(total_km), 3),
                            ROUND(MEDIAN(propagation_span_hours), 2)
                     FROM gold_propagation_disagreement
+                    WHERE measurement_quality = 'ok'
                     """
                 ).fetchone()
-                gauge("stormtrace_disagreement_pairs", "Measured propagation-disagreement pairs", row[0])
+                excluded = connection.execute(
+                    "SELECT COUNT(*) FROM gold_propagation_disagreement "
+                    "WHERE measurement_quality <> 'ok'"
+                ).fetchone()[0]
+                gauge("stormtrace_disagreement_pairs", "Analysis-grade propagation-disagreement pairs", row[0])
                 gauge("stormtrace_disagreement_median_km", "Median disagreement total (km)", row[1])
                 gauge("stormtrace_disagreement_max_km", "Maximum disagreement total (km)", row[2])
                 gauge("stormtrace_disagreement_median_span_hours", "Median propagation span (h)", row[3])
+                gauge("stormtrace_disagreement_excluded_pairs", "Measured pairs outside the SGP4 analysis envelope", excluded)
+
 
             if table_exists(connection, "gold_ori_validation_stats"):
                 for metric, value in connection.execute(
@@ -304,7 +316,9 @@ def metrics() -> Response:
                 activity = connection.execute(
                     """
                     SELECT COUNT(*), COALESCE(SUM(observation_count), 0),
-                           COALESCE(SUM(good_count), 0), COALESCE(SUM(usable_count), 0)
+                           COALESCE(SUM(good_count), 0),
+                           COALESCE(SUM(completed_count), 0),
+                           COALESCE(SUM(scheduled_count), 0)
                     FROM gold_satnogs_activity
                     """
                 ).fetchone()
@@ -313,11 +327,23 @@ def metrics() -> Response:
                     "FROM satnogs_observation_history"
                 ).fetchone()
                 gauge("stormtrace_satnogs_days", "Days with recorded SatNOGS observation activity", activity[0])
-                gauge("stormtrace_satnogs_observations", "SatNOGS observation events recorded", activity[1])
-                gauge("stormtrace_satnogs_good_observations", "SatNOGS observations with good status", activity[2])
-                gauge("stormtrace_satnogs_usable_observations", "SatNOGS observations usable (good or future)", activity[3])
+                gauge("stormtrace_satnogs_observations", "Distinct SatNOGS observations recorded", activity[1])
+                gauge("stormtrace_satnogs_good_observations", "SatNOGS observations vetted good", activity[2])
+                gauge("stormtrace_satnogs_completed_observations", "SatNOGS observations with a final outcome (good, bad or failed)", activity[3])
+                gauge("stormtrace_satnogs_scheduled_observations", "SatNOGS observations still scheduled (future)", activity[4])
+                # Success rate over COMPLETED passes only. While nothing has
+                # completed the ratio is genuinely unknown, and 0 would read
+                # as "everything failed", so the metric is omitted entirely:
+                # an absent series is the honest signal.
+                if activity[3]:
+                    gauge(
+                        "stormtrace_satnogs_good_percent_of_completed",
+                        "Share of completed SatNOGS passes vetted good (%)",
+                        round(100.0 * activity[2] / activity[3], 1),
+                    )
                 gauge("stormtrace_satnogs_distinct_satellites", "Distinct NORAD objects heard by SatNOGS", distinct[0])
                 gauge("stormtrace_satnogs_distinct_stations", "Distinct SatNOGS ground stations", distinct[1])
+
     except DatabaseBusy:
         database_reachable.set(0)
     except duckdb.Error:
@@ -410,7 +436,7 @@ def space_weather() -> dict[str, Any]:
         )
         columns = [d[0] for d in relation.description]
         row = relation.fetchone()
-        return dict(zip(columns, row))
+        return dict(zip(columns, row, strict=True))
 
 
 @app.get("/population")
@@ -537,7 +563,7 @@ def reliability_object(norad_catalog_id: int) -> dict[str, Any]:
                 status_code=404,
                 detail=f"Object {norad_catalog_id} is not currently tracked.",
             )
-        return dict(zip(columns, row))
+        return dict(zip(columns, row, strict=True))
 
 
 @app.get("/disagreement")
@@ -560,10 +586,21 @@ def disagreement() -> dict[str, Any]:
                 ROUND(MEDIAN(radial_km), 3) AS median_radial_km,
                 ROUND(MEDIAN(cross_track_km), 3) AS median_cross_track_km
             FROM gold_propagation_disagreement
+            WHERE measurement_quality = 'ok'
             """
         )
         columns = [d[0] for d in relation.description]
-        stats = dict(zip(columns, relation.fetchone()))
+        stats = dict(zip(columns, relation.fetchone(), strict=True))
+        excluded = dict(
+            connection.execute(
+                """
+                SELECT measurement_quality, COUNT(*)
+                FROM gold_propagation_disagreement
+                WHERE measurement_quality <> 'ok'
+                GROUP BY 1
+                """
+            ).fetchall()
+        )
         largest = [
             {
                 "object_name": row[0],
@@ -576,6 +613,7 @@ def disagreement() -> dict[str, Any]:
                 SELECT object_name, source_group,
                        ROUND(propagation_span_hours, 1), ROUND(total_km, 2)
                 FROM gold_propagation_disagreement
+                WHERE measurement_quality = 'ok'
                 ORDER BY total_km DESC
                 LIMIT 5
                 """
@@ -586,9 +624,15 @@ def disagreement() -> dict[str, Any]:
                 "SGP4 drift between consecutive public element sets; "
                 "the later element is not perfect ground truth."
             ),
+            "scope": (
+                "Analysis-grade pairs only: measurements outside the SGP4 "
+                "envelope are kept as evidence but excluded from statistics."
+            ),
             **stats,
+            "excluded_pairs": excluded,
             "largest_measurements": largest,
         }
+
 
 
 @app.get("/validation")
@@ -625,7 +669,8 @@ def validation() -> dict[str, Any]:
             "method": (
                 "Point-in-time correct: scores reconstructed as they stood "
                 "at the earlier element's snapshot, then compared with the "
-                "measured disagreement when the refresh arrived."
+                "measured disagreement when the refresh arrived. Only "
+                "analysis-grade pairs are validated."
             ),
             "spearman_correlations": {
                 key: value
@@ -634,5 +679,9 @@ def validation() -> dict[str, Any]:
             },
             "drag_like_pairs": stats.get("drag_like_pairs"),
             "validated_pairs": stats.get("pairs"),
+            "excluded_pairs_outside_envelope": stats.get(
+                "excluded_pairs_outside_envelope"
+            ),
+
             "class_bins": bins,
         }
