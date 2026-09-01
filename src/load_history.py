@@ -12,9 +12,10 @@ from pathlib import Path
 
 try:
     import duckdb
-except ImportError:
+except ImportError as error:
     print("DuckDB is not installed. Run: python -m pip install duckdb")
-    raise SystemExit(1)
+    raise SystemExit(1) from error
+
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -510,18 +511,52 @@ def _load_file_rows(
     return len(rows)
 
 
-def main() -> int:
-    # Load the curated stations group before larger groups so that any
-    # object appearing in several groups keeps its stations copy.
+LOADER_PATTERNS = [
+    "celestrak/*.csv",
+    "noaa/magnetic_field_*.json",
+    "noaa/plasma_*.json",
+    "spaceweather/sw_*.csv",
+    "satnogs/observations_*.json",
+]
+
+
+def loadable_files() -> list[Path]:
+    """Every Bronze file this loader knows how to read, in load order.
+
+    The curated stations group is loaded before larger groups so that an
+    object appearing in several groups keeps its stations copy.
+    """
     celestrak_files = sorted(BRONZE.glob("celestrak/*.csv"))
     celestrak_files.sort(
         key=lambda path: (path.name.split("_", 1)[0] != "stations", path.name)
     )
-    files = celestrak_files
-    files += sorted(BRONZE.glob("noaa/magnetic_field_*.json"))
-    files += sorted(BRONZE.glob("noaa/plasma_*.json"))
-    files += sorted(BRONZE.glob("spaceweather/sw_*.csv"))
-    files += sorted(BRONZE.glob("satnogs/observations_*.json"))
+    files = list(celestrak_files)
+    for pattern in LOADER_PATTERNS[1:]:
+        files += sorted(BRONZE.glob(pattern))
+    return files
+
+
+def unloadable_files() -> list[Path]:
+    """Bronze files that match no loader pattern.
+
+    Such a file is silently ignored forever: unregistered, unloaded, and
+    invisible to the quality gate. One 6.9 MB `celestrak/active_*.json`
+    snapshot sat in Bronze for exactly that reason. The quality gate now
+    reports these so the invariant "every Bronze file is accounted for"
+    can actually be checked.
+    """
+    if not BRONZE.exists():
+        return []
+    known = {path.resolve() for path in loadable_files()}
+    return sorted(
+        path
+        for path in BRONZE.rglob("*")
+        if path.is_file() and path.resolve() not in known
+    )
+
+
+def main() -> int:
+    files = loadable_files()
     if not files:
         print("No Bronze snapshots found. Run Lessons 1 and 2 first.", file=sys.stderr)
         return 1
@@ -538,8 +573,20 @@ def main() -> int:
 
     print(f"Snapshots checked: {len(files)}")
     print(f"New rows loaded: {loaded_rows:,}")
+    ignored = unloadable_files()
+    if ignored:
+        print(
+            f"Warning: {len(ignored)} Bronze file(s) match no loader pattern "
+            "and were NOT loaded:",
+            file=sys.stderr,
+        )
+        for path in ignored[:5]:
+            print(f"  {path.relative_to(ROOT)}", file=sys.stderr)
+        if len(ignored) > 5:
+            print(f"  ... and {len(ignored) - 5} more", file=sys.stderr)
     print("Run this command again to see idempotency: it should load 0 new rows.")
     return 0
+
 
 
 if __name__ == "__main__":
