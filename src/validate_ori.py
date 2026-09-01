@@ -23,7 +23,14 @@ quiet-weather, so the factor is constant and cannot discriminate. That
 validation must wait for a disturbed period.
 
 Spearman rank correlation is computed with a pure-stdlib implementation
-(average ranks for ties, Pearson on ranks).
+(average ranks for ties, Pearson on ranks). Series are always built with
+`paired_values()`, which drops a row from BOTH sides when either value is
+missing: filtering one side alone misaligns the pairs and silently
+produces a meaningless correlation.
+
+Only measurements labelled 'ok' by the disagreement builder are validated.
+Long-span and extreme pairs stay in the Gold table as evidence but are
+excluded here, and the excluded count is reported as a statistic.
 """
 
 from __future__ import annotations
@@ -65,7 +72,9 @@ def pearson(xs: list[float], ys: list[float]) -> float:
     n = len(xs)
     mean_x = sum(xs) / n
     mean_y = sum(ys) / n
-    covariance = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    # strict=True: a length mismatch is the bug this module exists to
+    # prevent, so it must raise rather than truncate.
+    covariance = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys, strict=True))
     variance_x = sum((x - mean_x) ** 2 for x in xs)
     variance_y = sum((y - mean_y) ** 2 for y in ys)
     if variance_x == 0 or variance_y == 0:
@@ -73,8 +82,42 @@ def pearson(xs: list[float], ys: list[float]) -> float:
     return covariance / math.sqrt(variance_x * variance_y)
 
 
+
 def spearman(xs: list[float], ys: list[float]) -> float:
+    if len(xs) != len(ys):
+        raise ValueError(
+            f"spearman needs equal-length inputs, got {len(xs)} and {len(ys)}. "
+            "Filter both series together with paired_values() instead of "
+            "filtering one side: zip() would silently truncate and correlate "
+            "mismatched rows."
+        )
+    if len(xs) < 2:
+        return 0.0
     return pearson(average_ranks(xs), average_ranks(ys))
+
+
+def paired_values(
+    records: list[dict], x_key: str, y_key: str
+) -> tuple[list[float], list[float]]:
+    """Return two aligned series, keeping only rows where both are present.
+
+    This exists because filtering one series independently (for example
+    dropping NULL rates from y but not from x) silently misaligns the
+    pairs. zip() inside the correlation then truncates to the shorter list
+    and correlates row i of x against a different row's y. That bug turned
+    a real -0.30 score-vs-rate correlation into a meaningless +0.07.
+    """
+    xs: list[float] = []
+    ys: list[float] = []
+    for record in records:
+        x = record.get(x_key)
+        y = record.get(y_key)
+        if x is None or y is None:
+            continue
+        xs.append(float(x))
+        ys.append(float(y))
+    return xs, ys
+
 
 
 def median(values: list[float]) -> float:
@@ -110,7 +153,14 @@ JOIN orbital_snapshot_history h
   ON h.norad_catalog_id = d.norad_catalog_id
  AND h.element_epoch_utc = d.earlier_element_epoch_utc
  AND timezone('UTC', h.snapshot_at_utc) = d.earlier_snapshot_at_utc
+WHERE d.measurement_quality = 'ok'
 """
+
+EXCLUDED_QUERY = """
+SELECT COUNT(*) FROM gold_propagation_disagreement
+WHERE measurement_quality <> 'ok'
+"""
+
 
 
 def main() -> int:
@@ -122,11 +172,18 @@ def main() -> int:
     try:
         query = QUERY.replace(":mu:", str(MU)).replace(":earth_radius:", str(EARTH_RADIUS_KM))
         rows = connection.execute(query).fetchall()
+        excluded_pairs = connection.execute(EXCLUDED_QUERY).fetchone()[0]
         if not rows:
             print("StormTrace lesson 17 ORI validation")
-            print("No measurable pairs available yet; nothing to validate.")
+            print("No analysis-grade pairs available yet; nothing to validate.")
+            if excluded_pairs:
+                print(
+                    f"{excluded_pairs} measured pair(s) fall outside the SGP4 "
+                    "analysis envelope and are excluded by design."
+                )
             print("Once refreshed element sets appear, run this script again.")
             return 0
+
 
         scored: list[dict] = []
         for row in rows:
@@ -212,24 +269,22 @@ def main() -> int:
             """
         )
         if scored:
-            tuples = [
-                (
-                    s["norad"], s["name"], s["group"], s["base_score"],
-                    s["freshness"], s["drag_safety"], s["reliability_class"],
-                    s["age_hours"], s["altitude"], s["inclination"],
-                    s["eccentricity"], s["bstar"], s["span_hours"],
-                    s["radial_km"], s["along_km"], s["cross_km"],
-                    s["total_km"], s["km_per_hour"], s["along_dominant"],
-                )
-                for s in scored
-            ]
-            placeholders = "(" + ", ".join("?" for _ in tuples[0]) + ")"
-            values_sql = ", ".join([placeholders] * len(tuples))
-            parameters = [value for row in tuples for value in row]
-            connection.execute(
-                f"INSERT INTO gold_ori_validation_pairs VALUES {values_sql}",
-                parameters,
+            connection.executemany(
+                "INSERT INTO gold_ori_validation_pairs VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        s["norad"], s["name"], s["group"], s["base_score"],
+                        s["freshness"], s["drag_safety"], s["reliability_class"],
+                        s["age_hours"], s["altitude"], s["inclination"],
+                        s["eccentricity"], s["bstar"], s["span_hours"],
+                        s["radial_km"], s["along_km"], s["cross_km"],
+                        s["total_km"], s["km_per_hour"], s["along_dominant"],
+                    )
+                    for s in scored
+                ],
             )
+
 
         # Bin by predicted class; medians are robust to maneuver outliers.
         class_order = ["high", "moderate", "reduced", "low"]
@@ -269,44 +324,50 @@ def main() -> int:
             """
         )
         if bins:
-            tuples = [
-                (b["class"], b["count"], b["median_total"], b["p90_total"],
-                 b["median_rate"], b["median_along"])
-                for b in bins
-            ]
-            placeholders = "(" + ", ".join("?" for _ in tuples[0]) + ")"
-            values_sql = ", ".join([placeholders] * len(tuples))
-            parameters = [value for row in tuples for value in row]
-            connection.execute(
-                f"INSERT INTO gold_ori_validation_bins VALUES {values_sql}",
-                parameters,
+            connection.executemany(
+                "INSERT INTO gold_ori_validation_bins VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (b["class"], b["count"], b["median_total"], b["p90_total"],
+                     b["median_rate"], b["median_along"])
+                    for b in bins
+                ],
             )
 
+
         # Rank correlations: negative means lower score -> larger error,
-        # which is exactly what the index predicts.
-        scores = [s["base_score"] for s in scored]
+        # which is exactly what the index predicts. Every pair of series is
+        # built with paired_values() so the two sides always describe the
+        # same rows.
         stats: list[tuple[str, float]] = []
         stats.append(("pairs", float(len(scored))))
-        stats.append(("spearman_score_vs_total_km", round(spearman(scores, [s["total_km"] for s in scored]), 4)))
-        stats.append(("spearman_score_vs_km_per_hour", round(spearman(scores, [s["km_per_hour"] for s in scored if s["km_per_hour"] is not None]), 4) if any(s["km_per_hour"] is not None for s in scored) else 0.0))
-        stats.append(("spearman_age_vs_total_km", round(spearman([s["age_hours"] for s in scored], [s["total_km"] for s in scored]), 4)))
+        stats.append(("excluded_pairs_outside_envelope", float(excluded_pairs)))
+
+        for metric, x_key, y_key, records in [
+            ("spearman_score_vs_total_km", "base_score", "total_km", scored),
+            ("spearman_score_vs_km_per_hour", "base_score", "km_per_hour", scored),
+            ("spearman_age_vs_total_km", "age_hours", "total_km", scored),
+        ]:
+            xs, ys = paired_values(records, x_key, y_key)
+            stats.append((metric, round(spearman(xs, ys), 4)))
+
         drag_like = [s for s in scored if s["along_dominant"]]
         if len(drag_like) >= 3:
             stats.append(("drag_like_pairs", float(len(drag_like))))
-            stats.append(("spearman_score_vs_total_km_drag_like", round(spearman([s["base_score"] for s in drag_like], [s["total_km"] for s in drag_like]), 4)))
-            stats.append(("spearman_altitude_vs_total_km_drag_like", round(spearman([s["altitude"] for s in drag_like], [s["total_km"] for s in drag_like]), 4)))
+            for metric, x_key in [
+                ("spearman_score_vs_total_km_drag_like", "base_score"),
+                ("spearman_altitude_vs_total_km_drag_like", "altitude"),
+            ]:
+                xs, ys = paired_values(drag_like, x_key, "total_km")
+                stats.append((metric, round(spearman(xs, ys), 4)))
 
         connection.execute(
             "CREATE OR REPLACE TABLE gold_ori_validation_stats (metric VARCHAR, value DOUBLE)"
         )
         if stats:
-            placeholders = "(" + ", ".join("?" for _ in stats[0]) + ")"
-            values_sql = ", ".join([placeholders] * len(stats))
-            parameters = [value for row in stats for value in row]
-            connection.execute(
-                f"INSERT INTO gold_ori_validation_stats VALUES {values_sql}",
-                parameters,
+            connection.executemany(
+                "INSERT INTO gold_ori_validation_stats VALUES (?, ?)", stats
             )
+
 
         GOLD_DIR.mkdir(parents=True, exist_ok=True)
         connection.execute(
@@ -325,8 +386,14 @@ def main() -> int:
         connection.close()
 
     print("StormTrace lesson 17 ORI validation")
-    print(f"Validated pairs: {len(scored)}")
+    print(f"Validated pairs: {len(scored)} (analysis-grade only)")
+    if excluded_pairs:
+        print(
+            f"Excluded from validation: {excluded_pairs} pair(s) outside the "
+            "SGP4 analysis envelope (long span or extreme disagreement)."
+        )
     print()
+
     print("Predicted class -> measured disagreement (medians, robust to maneuvers):")
     for b in bins:
         rate_text = f", {b['median_rate']} km/h" if b["median_rate"] is not None else ""
@@ -336,8 +403,9 @@ def main() -> int:
         )
     print()
     for metric, value in stats:
-        if metric != "pairs":
+        if metric not in ("pairs", "excluded_pairs_outside_envelope"):
             print(f"  {metric}: {value}")
+
     print()
     print("Reading the correlations: negative score-vs-error means the index")
     print("predicts correctly (lower score, larger error). Positive age-vs-error")
