@@ -487,7 +487,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "SatNOGS observation events recorded. Independent crowd-sourced evidence that tracked populations are still being heard.",
+      "description": "Distinct SatNOGS observations recorded. Independent crowd-sourced evidence that tracked populations are still being heard. Counted once per observation, not once per stored version.",
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "gridPos": { "h": 4, "w": 4, "x": 20, "y": 17 },
       "id": 17,
@@ -503,7 +503,64 @@
           "refId": "A"
         }
       ],
-      "title": "SatNOGS Activity",
+      "title": "SatNOGS Observations",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Passes that reached a final vetted outcome (good, bad or failed). Scheduled 'future' passes are excluded: they are coverage, not outcomes. This series is empty until the first pass completes, which is the honest signal for an unknown value.",
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 21 },
+      "id": 18,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_satnogs_completed_observations",
+          "refId": "A"
+        }
+      ],
+      "title": "SatNOGS Completed Passes",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Share of COMPLETED SatNOGS passes vetted good. The denominator excludes scheduled passes, so this is a real success rate rather than a diluted one. The API omits the metric entirely while nothing has completed: an absent series means unknown, whereas 0 would wrongly read as 'everything failed'.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 40 },
+              { "color": "green", "value": 70 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 21 },
+      "id": 19,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "stormtrace_satnogs_good_percent_of_completed",
+          "refId": "A"
+        }
+      ],
+      "title": "SatNOGS Good Pass Rate",
       "type": "stat"
     }
   ],

@@ -9,6 +9,13 @@ same path the browser panels use -- then reports frames and last values.
     python src/verify_dashboard.py
 
 Exits 1 when any panel has no targets or any target returns no data.
+
+Some metrics are deliberately ABSENT rather than zero: the SatNOGS good
+pass rate has no honest value until a pass completes, and publishing 0
+would read as "everything failed". Those panels are listed in
+OPTIONAL_PANELS: an empty result is reported as an expected gap rather
+than a failure, and a non-empty result is verified normally.
+
 Prerequisites: docker compose up -d and the API running on port 8000.
 """
 
@@ -21,6 +28,14 @@ import urllib.request
 
 GRAFANA = "http://127.0.0.1:3000"
 DASHBOARD_UID = "stormtrace-research"
+
+# Panel titles whose metric may legitimately not exist yet, with the reason.
+OPTIONAL_PANELS = {
+    "SatNOGS Good Pass Rate": (
+        "the API omits this metric until at least one pass has completed"
+    ),
+}
+
 
 
 def fetch_dashboard() -> dict:
@@ -68,10 +83,12 @@ def frame_summary(frame: dict) -> str:
 def main() -> int:
     try:
         dashboard = fetch_dashboard()
-    except Exception as error:
+    except (urllib.error.URLError, TimeoutError, ValueError,
+            json.JSONDecodeError, KeyError) as error:
         print(f"Could not fetch dashboard from Grafana: {error}", file=sys.stderr)
         print("Is the stack running? docker compose up -d", file=sys.stderr)
         return 1
+
 
     time_from = dashboard.get("time", {}).get("from", "now-6h")
     time_to = dashboard.get("time", {}).get("to", "now")
@@ -82,6 +99,7 @@ def main() -> int:
     print()
 
     failures = 0
+    expected_gaps = 0
     for panel in panels:
         title = panel.get("title", f"panel {panel.get('id')}")
         targets = panel.get("targets") or []
@@ -90,6 +108,7 @@ def main() -> int:
             failures += 1
             continue
 
+        optional_reason = OPTIONAL_PANELS.get(title)
         panel_failed = False
         for target in targets:
             expr = target.get("expr")
@@ -103,14 +122,19 @@ def main() -> int:
                 print(f"[FAIL] {title} :: {expr}: HTTP {error.code}")
                 panel_failed = True
                 continue
-            except Exception as error:
+            except (urllib.error.URLError, TimeoutError, ValueError,
+                    json.JSONDecodeError, KeyError) as error:
                 print(f"[FAIL] {title} :: {expr}: {error}")
                 panel_failed = True
                 continue
 
             if not frames:
-                print(f"[FAIL] {title} :: {expr}: no data")
-                panel_failed = True
+                if optional_reason:
+                    print(f"[GAP ] {title} :: {expr}: no data yet -- {optional_reason}")
+                    expected_gaps += 1
+                else:
+                    print(f"[FAIL] {title} :: {expr}: no data")
+                    panel_failed = True
             else:
                 summaries = "; ".join(frame_summary(frame) for frame in frames[:3])
                 more = f" (+{len(frames) - 3} more)" if len(frames) > 3 else ""
@@ -123,8 +147,15 @@ def main() -> int:
     if failures:
         print(f"{failures} panel(s) failed verification.", file=sys.stderr)
         return 1
-    print(f"All {len(panels)} panels verified: every target returns data.")
+    if expected_gaps:
+        print(
+            f"All {len(panels)} panels verified: {expected_gaps} expected gap(s), "
+            "every other target returns data."
+        )
+    else:
+        print(f"All {len(panels)} panels verified: every target returns data.")
     return 0
+
 
 
 if __name__ == "__main__":

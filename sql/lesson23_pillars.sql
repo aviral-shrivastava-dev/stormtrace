@@ -66,20 +66,60 @@ FROM (
 WHERE newest_rank = 1
 ORDER BY observation_date;
 
--- Daily SatNOGS observation activity: hears, distinct satellites and
--- stations, and good passes. Combined with orbit features, this answers
--- "was a population still observable and transmitting during a storm?"
+-- Daily SatNOGS observation activity.
+--
+-- Counting is DISTINCT by observation_id, not COUNT(*). The history table
+-- deliberately keeps every version of an observation (a pass first seen as
+-- 'future' and later resolved to 'good' is two rows, which is correct
+-- evidence), so a plain COUNT(*) inflated the daily totals -- 50 reported
+-- where 32 observations existed.
+--
+-- Each observation is reduced to its NEWEST version first: that is the one
+-- carrying the final vetted status. Only then are the daily aggregates
+-- computed, so 'good' means "was ultimately judged good", not "happened to
+-- be labelled good in some snapshot".
+--
+-- 'future' passes are counted separately as scheduled_count. They are
+-- coverage, not outcomes, and must never be mixed into a success rate.
 CREATE OR REPLACE TABLE gold_satnogs_activity AS
+WITH newest_version AS (
+    SELECT * EXCLUDE (version_rank)
+    FROM (
+        SELECT
+            observation_id,
+            start_utc,
+            status,
+            norad_catalog_id,
+            station_id,
+            ROW_NUMBER() OVER (
+                PARTITION BY observation_id
+                ORDER BY snapshot_at_utc DESC
+            ) AS version_rank
+        FROM satnogs_observation_history
+        WHERE observation_id IS NOT NULL
+    )
+    WHERE version_rank = 1
+)
 SELECT
     CAST(start_utc AS DATE) AS observation_date,
     COUNT(*) AS observation_count,
     COUNT(DISTINCT norad_catalog_id) AS distinct_satellites,
     COUNT(DISTINCT station_id) AS distinct_stations,
     COUNT(*) FILTER (WHERE status = 'good') AS good_count,
-    COUNT(*) FILTER (WHERE status IN ('good', 'future')) AS usable_count
-FROM satnogs_observation_history
+    COUNT(*) FILTER (WHERE status IN ('good', 'bad', 'failed'))
+        AS completed_count,
+    COUNT(*) FILTER (WHERE status = 'future') AS scheduled_count,
+    -- Share of COMPLETED passes that were good. NULL (not zero) while no
+    -- pass has finished yet: an unknown rate is not a zero rate.
+    ROUND(
+        100.0 * COUNT(*) FILTER (WHERE status = 'good')
+        / NULLIF(COUNT(*) FILTER (WHERE status IN ('good', 'bad', 'failed')), 0),
+        1
+    ) AS good_percent_of_completed
+FROM newest_version
 GROUP BY CAST(start_utc AS DATE)
 ORDER BY observation_date;
+
 
 -- The debris cohort, shaped for direct comparison against the other groups.
 CREATE OR REPLACE TABLE gold_debris_population AS
