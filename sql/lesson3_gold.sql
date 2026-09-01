@@ -1,56 +1,70 @@
--- Lesson 3: create a minute-level Gold space-weather table.
--- Both files contain UTC timestamps, but their seconds do not always match.
+-- Lesson 3 (rebuilt): minute-level Gold space weather from HISTORY.
+--
+-- This table used to read data/silver/noaa_*_latest.csv, the file each
+-- ingestion run overwrites. NOAA's real-time feed is a 24-hour rolling
+-- window, so Gold could only ever see one day no matter how long the
+-- project collected -- while noaa_magnetic_history accumulated every
+-- snapshot ever taken. Every downstream consumer (hourly disturbance
+-- levels, the ORI environment factor, the storm comparison) inherited
+-- that one-day ceiling, which is why the environment factor was a
+-- constant 1.0 across the whole database.
+--
+-- Reading history instead makes Gold cover the full collection period.
+--
+-- Deduplication is now required. Overlapping rolling-window fetches store
+-- the same observed minute many times (roughly 6x at a 2-hour cadence),
+-- so one observation per (minute, spacecraft) is chosen first, then one
+-- spacecraft per minute. The winner is the most trustworthy version:
+--   1. NOAA's own active-source flag
+--   2. the lowest (best) quality code
+--   3. the most recent snapshot, which supersedes earlier revisions
 CREATE OR REPLACE TABLE gold_space_weather_minute AS
-WITH magnetic_raw AS (
+WITH magnetic_ranked AS (
     SELECT
-        date_trunc('minute', CAST(observed_at_utc AS TIMESTAMP)) AS observation_minute_utc,
+        date_trunc('minute', observed_at_utc) AS observation_minute_utc,
         observed_at_utc AS magnetic_observed_at_utc,
         spacecraft AS magnetic_spacecraft,
         is_active_source AS magnetic_source_is_active,
-        TRY_CAST(total_field_nanotesla AS DOUBLE) AS total_field_nanotesla,
-        TRY_CAST(bx_gsm_nanotesla AS DOUBLE) AS bx_gsm_nanotesla,
-        TRY_CAST(by_gsm_nanotesla AS DOUBLE) AS by_gsm_nanotesla,
-        TRY_CAST(bz_gsm_nanotesla AS DOUBLE) AS bz_gsm_nanotesla,
-        TRY_CAST(quality_code AS INTEGER) AS magnetic_quality_code
-    FROM read_csv_auto('data/silver/noaa_magnetic_field_latest.csv')
+        bt AS total_field_nanotesla,
+        bx_gsm AS bx_gsm_nanotesla,
+        by_gsm AS by_gsm_nanotesla,
+        bz_gsm AS bz_gsm_nanotesla,
+        quality_code AS magnetic_quality_code,
+        row_number() OVER (
+            PARTITION BY date_trunc('minute', observed_at_utc)
+            ORDER BY is_active_source DESC NULLS LAST,
+                     quality_code ASC NULLS LAST,
+                     snapshot_at_utc DESC,
+                     observed_at_utc DESC
+        ) AS source_rank
+    FROM noaa_magnetic_history
+    WHERE observed_at_utc IS NOT NULL
 ), magnetic AS (
     SELECT * EXCLUDE (source_rank)
-    FROM (
-        SELECT
-            *,
-            row_number() OVER (
-                PARTITION BY observation_minute_utc
-                ORDER BY magnetic_source_is_active DESC,
-                         magnetic_quality_code ASC,
-                         magnetic_observed_at_utc DESC
-            ) AS source_rank
-        FROM magnetic_raw
-    )
+    FROM magnetic_ranked
     WHERE source_rank = 1
-), plasma_raw AS (
+), plasma_ranked AS (
     SELECT
-        date_trunc('minute', CAST(observed_at_utc AS TIMESTAMP)) AS observation_minute_utc,
+        date_trunc('minute', observed_at_utc) AS observation_minute_utc,
         observed_at_utc AS plasma_observed_at_utc,
         spacecraft AS plasma_spacecraft,
         is_active_source AS plasma_source_is_active,
-        TRY_CAST(proton_speed_km_per_second AS DOUBLE) AS proton_speed_km_per_second,
-        TRY_CAST(proton_temperature_kelvin AS DOUBLE) AS proton_temperature_kelvin,
-        TRY_CAST(proton_density_per_cubic_cm AS DOUBLE) AS proton_density_per_cubic_cm,
-        TRY_CAST(quality_code AS INTEGER) AS plasma_quality_code
-    FROM read_csv_auto('data/silver/noaa_plasma_latest.csv')
+        proton_speed AS proton_speed_km_per_second,
+        proton_temperature AS proton_temperature_kelvin,
+        proton_density AS proton_density_per_cubic_cm,
+        quality_code AS plasma_quality_code,
+        row_number() OVER (
+            PARTITION BY date_trunc('minute', observed_at_utc)
+            ORDER BY is_active_source DESC NULLS LAST,
+                     quality_code ASC NULLS LAST,
+                     snapshot_at_utc DESC,
+                     observed_at_utc DESC
+        ) AS source_rank
+    FROM noaa_plasma_history
+    WHERE observed_at_utc IS NOT NULL
 ), plasma AS (
     SELECT * EXCLUDE (source_rank)
-    FROM (
-        SELECT
-            *,
-            row_number() OVER (
-                PARTITION BY observation_minute_utc
-                ORDER BY plasma_source_is_active DESC,
-                         plasma_quality_code ASC,
-                         plasma_observed_at_utc DESC
-            ) AS source_rank
-        FROM plasma_raw
-    )
+    FROM plasma_ranked
     WHERE source_rank = 1
 )
 SELECT
@@ -75,3 +89,4 @@ FROM magnetic
 LEFT JOIN plasma
     ON magnetic.observation_minute_utc = plasma.observation_minute_utc
 ORDER BY magnetic.observation_minute_utc DESC;
+
